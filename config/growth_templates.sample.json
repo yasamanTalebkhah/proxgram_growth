@@ -1,0 +1,12 @@
+{
+  "_comment": "Comment templates for the growth worker. Placeholders: {channel} (destination mention), {proxy_count}, {speed_note}. Keep comments short, on-topic, human and non-aggressive.",
+  "templates": [
+    "Fresh batch of fast proxies just landed in {channel} - {proxy_count} nodes, {speed_note}.",
+    "Need quick market checks? Grab a low-latency node from {channel}. {proxy_count} fresh IPs online.",
+    "PSA: new {speed_note} proxies are up in {channel} right now.",
+    "Pool rotated - {proxy_count} clean IPs live in {channel}.",
+    "Anyone testing tooling today: fresh {speed_note} nodes were added to {channel}.",
+    "Updated the list in {channel}: {proxy_count} proxies, all {speed_note}.",
+    "For folks monitoring tickers - low-latency options are available in {channel}."
+  ]
+}

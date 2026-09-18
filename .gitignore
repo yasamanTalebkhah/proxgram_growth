@@ -1,0 +1,14 @@
+# Secrets & local config
+.env
+.env.*
+!.env.growth.example
+config/growth_worker.json
+config/growth_templates.json
+var/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
