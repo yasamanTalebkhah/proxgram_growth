@@ -1,4 +1,4 @@
-"""Comment template handling: validation, rendering, random selection.
+"""Dynamic and rotatable comment template repository.
 
 Placeholders:
   {channel}       destination channel mention (e.g. @proxgram)
@@ -16,8 +16,6 @@ import random
 import string
 from typing import Mapping
 
-# Conservative charset for rendered comments: predictable output, easy to
-# unit-test, and avoids characters Telegram may parse as entities.
 _ALLOWED_CHARS = set(string.ascii_letters + string.digits + " _-.,!?:;()'\"/@#%+*[]")
 MAX_COMMENT_LENGTH = 1024
 
@@ -57,11 +55,7 @@ def render_template(
     *,
     rng: random.Random | None = None,
 ) -> str:
-    """Render a template; TemplateError on unknown placeholders or bad output.
-
-    Explicit failures matter here: a half-rendered comment posted publicly
-    would look broken (or spammy) to readers and could invite reports.
-    """
+    """Render a template; TemplateError on unknown placeholders or bad output."""
     try:
         rendered = template.format_map(_SafeDict(context))
     except (KeyError, IndexError) as exc:

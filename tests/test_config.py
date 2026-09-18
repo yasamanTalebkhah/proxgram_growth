@@ -4,17 +4,17 @@ from __future__ import annotations
 
 import pytest
 
-from proxgram_growth.config import (
+from config import (
     ConfigError,
     TargetConfig,
     config_from_env,
     load_config,
 )
-from proxgram_growth.templates import DEFAULT_TEMPLATES
+from templates import DEFAULT_TEMPLATES
 
 BASE_ENV = {
-    "API_ID": "123456",
-    "API_HASH": "b" * 32,
+    "TELEGRAM_API_ID": "123456",
+    "TELEGRAM_API_HASH": "b" * 32,
     "SESSION_STRING": "s" * 40,
     "GROWTH_DESTINATION_CHANNEL": "@proxgram",
     "GROWTH_TARGET_CHANNELS": "@news, https://t.me/markets_daily",
@@ -31,10 +31,11 @@ def test_env_config_builds_targets_and_defaults():
 
 
 def test_missing_required_env_raises():
-    env = dict(BASE_ENV)
-    del env["SESSION_STRING"]
-    with pytest.raises(ConfigError):
-        config_from_env(env, templates=DEFAULT_TEMPLATES).validate()
+    for required in ("TELEGRAM_API_ID", "TELEGRAM_API_HASH", "SESSION_STRING",
+                     "GROWTH_DESTINATION_CHANNEL", "GROWTH_TARGET_CHANNELS"):
+        env = {k: v for k, v in BASE_ENV.items() if k != required}
+        with pytest.raises(ConfigError):
+            config_from_env(env, templates=DEFAULT_TEMPLATES).validate()
 
 
 def test_invalid_target_format_rejected():
@@ -63,11 +64,6 @@ def test_duplicate_targets_rejected():
         config.validate()
 
 
-def test_default_templates_pass_validation():
-    config = config_from_env(BASE_ENV, templates=DEFAULT_TEMPLATES)
-    config.validate()  # must not raise
-
-
 def test_empty_templates_rejected():
     config = config_from_env(BASE_ENV, templates=())
     with pytest.raises(ConfigError):
@@ -86,38 +82,108 @@ def test_overlong_template_rejected():
         config.validate()
 
 
-def test_load_config_from_json_file(tmp_path):
-    import json
+def test_default_templates_pass_validation():
+    config = config_from_env(BASE_ENV, templates=DEFAULT_TEMPLATES)
+    config.validate()  # must not raise
 
-    cfg_file = tmp_path / "growth_worker.json"
-    cfg_file.write_text(
-        json.dumps(
-            {
-                "GROWTH_TARGET_CHANNELS": "@news",
-                "GROWTH_DESTINATION_CHANNEL": "@proxgram",
-                "API_ID": 123456,
-                "API_HASH": "b" * 32,
-                "SESSION_STRING": "s" * 40,
-            }
+
+# --------------------------------------------------------------------- #
+# Isolation guard: bot tokens must never be accepted
+# --------------------------------------------------------------------- #
+
+
+def test_bot_token_in_session_string_rejected():
+    token = "1234567890:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw"
+    env = dict(BASE_ENV, SESSION_STRING=token)
+    with pytest.raises(ConfigError):
+        config_from_env(env, templates=DEFAULT_TEMPLATES).validate()
+
+
+def test_bot_token_in_api_hash_rejected():
+    env = dict(BASE_ENV, TELEGRAM_API_HASH="1234567890:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw")
+    with pytest.raises(ConfigError):
+        config_from_env(env, templates=DEFAULT_TEMPLATES).validate()
+
+
+# --------------------------------------------------------------------- #
+# File loading
+# --------------------------------------------------------------------- #
+
+
+def test_load_config_from_env_file(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "TELEGRAM_API_ID=123456",
+                "TELEGRAM_API_HASH=" + "b" * 32,
+                "SESSION_STRING=" + "s" * 40,
+                "GROWTH_DESTINATION_CHANNEL=@proxgram",
+                "GROWTH_TARGET_CHANNELS=@news",
+            ]
         ),
         encoding="utf-8",
     )
-    config = load_config(str(cfg_file), env={}, templates_path=None)
+    config = load_config(env_file=str(env_file), environ={})
     assert config.destination_channel == "@proxgram"
     assert config.targets[0].channel == "@news"
 
 
-def test_load_config_env_overrides_file_secrets(tmp_path):
+def test_process_env_takes_precedence_over_env_file(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "TELEGRAM_API_ID=123456",
+                "TELEGRAM_API_HASH=" + "b" * 32,
+                "SESSION_STRING=" + "s" * 40,
+                "GROWTH_DESTINATION_CHANNEL=@fromfile",
+                "GROWTH_TARGET_CHANNELS=@news",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    config = load_config(
+        env_file=str(env_file), environ=dict(BASE_ENV, GROWTH_DESTINATION_CHANNEL="@fromenv")
+    )
+    assert config.destination_channel == "@fromenv"
+
+
+def test_load_config_json_file_overrides(tmp_path):
     import json
 
     cfg_file = tmp_path / "growth_worker.json"
     cfg_file.write_text(
-        json.dumps({"API_ID": 111, "API_HASH": "file-hash", "SESSION_STRING": "file-session",
-                    "GROWTH_TARGET_CHANNELS": "@news", "GROWTH_DESTINATION_CHANNEL": "@proxgram"}),
+        json.dumps({"GROWTH_TARGET_CHANNELS": "@news", "GROWTH_DESTINATION_CHANNEL": "@proxgram"}),
         encoding="utf-8",
     )
-    env = {"API_ID": "222", "API_HASH": "env-hash", "SESSION_STRING": "env-session"}
-    config = load_config(str(cfg_file), env=env)
-    assert config.api_id == 222
-    assert config.api_hash == "env-hash"
-    assert config.session_string == "env-session"
+    config = load_config(str(cfg_file), env_file=str(tmp_path / "missing.env"), environ=BASE_ENV)
+    assert config.destination_channel == "@proxgram"
+    assert config.targets[0].channel == "@news"
+
+
+def test_load_config_env_overrides_file(tmp_path):
+    import json
+
+    cfg_file = tmp_path / "growth_worker.json"
+    cfg_file.write_text(
+        json.dumps({"GROWTH_TARGET_CHANNELS": "@fromfile", "GROWTH_DESTINATION_CHANNEL": "@x"}),
+        encoding="utf-8",
+    )
+    config = load_config(str(cfg_file), env_file=str(tmp_path / "missing.env"), environ=BASE_ENV)
+    # Env takes precedence over the JSON file.
+    assert config.destination_channel == "@proxgram"
+
+
+def test_templates_file_loading(tmp_path):
+    import json
+
+    tpl_file = tmp_path / "templates.json"
+    tpl_file.write_text(
+        json.dumps({"templates": ["Visit {channel} for {proxy_count} proxies"]}),
+        encoding="utf-8",
+    )
+    config = load_config(
+        templates_path=str(tpl_file), env_file=str(tmp_path / "missing.env"), environ=BASE_ENV
+    )
+    assert config.templates == ("Visit {channel} for {proxy_count} proxies",)

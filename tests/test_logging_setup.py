@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from proxgram_growth.logging_setup import SecretFilter, configure_logging, redact
+from logging_setup import SecretFilter, configure_logging, redact
 
 SESSION = "1ApWapzMBuVerySecretSessionString1234567890"
 API_HASH = "0123456789abcdef0123456789abcdef"

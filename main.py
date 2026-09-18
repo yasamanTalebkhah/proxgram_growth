@@ -1,13 +1,13 @@
-"""Core growth worker engine built on Telethon.
+"""ProxGram Growth — Telethon userbot entry point.
 
 Monitors target channels for new posts and posts a randomized, non-spam
 comment on the linked discussion thread pointing to the destination
 channel — guarded by per-target cooldowns, a global comment cap, human-like
-delays and FloodWait-aware exponential backoff.
+delays, FloodWait-aware exponential backoff and persistent processed-post
+tracking.
 
-This process is intentionally separate from the main posting bot: it uses
-its own userbot session (StringSession from env), so the main bot token is
-never exposed to restriction risk.
+This process is fully isolated from the main posting bot: it authenticates
+with its own user session (SESSION_STRING) and never touches bot tokens.
 """
 
 from __future__ import annotations
@@ -26,15 +26,17 @@ from telethon.sessions import StringSession
 from telethon.tl.functions.channels import GetFullChannelRequest
 from telethon import utils as tl_utils
 
-from .backoff import BackoffPolicy
-from .config import Config, TargetConfig
-from .rate_limit import GlobalPacer, HumanDelay, PerTargetPacer
-from .state import StateStore
-from .templates import SPEED_NOTES, render_random_with_template
+from backoff import BackoffPolicy
+from config import Config, TargetConfig, load_config
+from logging_setup import configure_logging
+from rate_limit import GlobalPacer, HumanDelay, PerTargetPacer
+from state_manager import StateManager
+from templates import SPEED_NOTES, render_random_with_template
 
 logger = logging.getLogger("proxgram.growth")
 
 MAX_TRACKED_ALBUMS = 256
+MAX_ATTEMPTS = 5
 
 
 @dataclass
@@ -42,6 +44,7 @@ class WorkerStats:
     posts_seen: int = 0
     comments_posted: int = 0
     comments_skipped_cooldown: int = 0
+    comments_skipped_processed: int = 0
     comments_skipped_global: int = 0
     comments_failed: int = 0
     flood_waits: int = 0
@@ -52,9 +55,11 @@ class PendingComment:
     """A comment scheduled for a channel post's discussion thread."""
 
     target: TargetConfig
+    channel: str
     discussion_entity: Any
     discussion_id: int
     reply_to_msg_id: int
+    post_id: int
     context: dict[str, Any] = field(default_factory=dict)
 
 
@@ -76,17 +81,17 @@ class GrowthWorker:
         *,
         client: Any = None,
         rng: random.Random | None = None,
-        state: StateStore | None = None,
+        state: StateManager | None = None,
         sleep: Any = None,
         clock: Any = None,
         comment_poster: Any = None,
-        max_attempts: int = 5,
+        max_attempts: int = MAX_ATTEMPTS,
     ) -> None:
         self.config = config
         self.rng = rng or random.Random()
         self.sleep = sleep or asyncio.sleep
         self.clock = clock or time.time
-        self.state = state or StateStore(config.state_file)
+        self.state = state or StateManager(config.state_file)
         self.pacer = PerTargetPacer(rng=self.rng)
         self.global_pacer = GlobalPacer(
             max_comments=config.global_max_comments,
@@ -131,7 +136,7 @@ class GrowthWorker:
         if not await self.client.is_user_authorized():
             logger.error(
                 "Session is not authorized; refusing to start. "
-                "Regenerate SESSION_STRING via scripts/growth_session.py."
+                "Regenerate SESSION_STRING via scripts/generate_session.py."
             )
             return
         me = await self.client.get_me()
@@ -178,6 +183,7 @@ class GrowthWorker:
         if self._pending:
             await asyncio.gather(*self._pending.values(), return_exceptions=True)
         self._pending.clear()
+        self.state.save()
         if self.client is not None and getattr(self.client, "is_connected", lambda: False)():
             try:
                 await self.client.disconnect()
@@ -185,10 +191,11 @@ class GrowthWorker:
                 logger.warning("Error while disconnecting client", exc_info=True)
         logger.info(
             "Growth worker stopped. seen=%d posted=%d cooldown_skips=%d "
-            "global_skips=%d failed=%d flood_waits=%d",
+            "processed_skips=%d global_skips=%d failed=%d flood_waits=%d",
             self.stats.posts_seen,
             self.stats.comments_posted,
             self.stats.comments_skipped_cooldown,
+            self.stats.comments_skipped_processed,
             self.stats.comments_skipped_global,
             self.stats.comments_failed,
             self.stats.flood_waits,
@@ -269,17 +276,28 @@ class GrowthWorker:
             return  # Only the first item of an album triggers a comment.
 
         self.stats.posts_seen += 1
+
+        # Idempotency: never handle the same channel/post id twice
+        # (protects against Telegram redelivering updates after reconnects).
+        if self.state.is_post_processed(target.channel, message.id):
+            self.stats.comments_skipped_processed += 1
+            logger.debug("Post %s in %s already processed; skipping", message.id, target.channel)
+            return
+
         if self._pending_by_target.get(target.channel, 0) > 0:
             self.stats.comments_skipped_cooldown += 1
             logger.info("Comment already pending for %s; skipping", target.channel)
             return
 
+        self.state.mark_post_processed(target.channel, message.id)
         self._spawn_comment_task(
             PendingComment(
                 target=target,
+                channel=target.channel,
                 discussion_entity=discussion_entity,
                 discussion_id=discussion_id,
                 reply_to_msg_id=reply_to,
+                post_id=message.id,
                 context=self._build_context(),
             )
         )
@@ -346,14 +364,12 @@ class GrowthWorker:
     def _spawn_comment_task(self, pending: PendingComment) -> None:
         task = asyncio.get_running_loop().create_task(
             self._comment_flow(pending),
-            name=f"growth-comment:{pending.target.channel}:{pending.reply_to_msg_id}",
+            name=f"growth-comment:{pending.channel}:{pending.reply_to_msg_id}",
         )
         self._pending[id(task)] = task
-        self._pending_by_target[pending.target.channel] = (
-            self._pending_by_target.get(pending.target.channel, 0) + 1
-        )
+        self._pending_by_target[pending.channel] = self._pending_by_target.get(pending.channel, 0) + 1
 
-        def _done(t: asyncio.Task, *, _key: str = pending.target.channel) -> None:
+        def _done(t: asyncio.Task, *, _key: str = pending.channel) -> None:
             self._pending.pop(id(t), None)
             remaining = self._pending_by_target.get(_key, 1) - 1
             if remaining > 0:
@@ -366,7 +382,7 @@ class GrowthWorker:
     async def _comment_flow(self, pending: PendingComment) -> None:
         """Human delay -> per-target cooldown -> global cap -> send with retry."""
         target = pending.target
-        key = target.channel
+        key = pending.channel
 
         # 1. Human-like delay before engaging.
         delay = HumanDelay(
@@ -386,9 +402,7 @@ class GrowthWorker:
             wait = max(wait, remaining, 0.0)
         if wait > 0:
             self.stats.comments_skipped_cooldown += 1
-            logger.info(
-                "Cooldown active for %s (%.0fs left); skipping this post", key, wait
-            )
+            logger.info("Cooldown active for %s (%.0fs left); skipping this post", key, wait)
             return
 
         # 3. Global account-level cap.
@@ -413,9 +427,7 @@ class GrowthWorker:
 
         await self._send_with_retry(pending, text, template)
 
-    async def _send_with_retry(
-        self, pending: PendingComment, text: str, template: str
-    ) -> None:
+    async def _send_with_retry(self, pending: PendingComment, text: str, template: str) -> None:
         target = pending.target
         for attempt in range(self.max_attempts):
             try:
@@ -429,22 +441,22 @@ class GrowthWorker:
                     )
             except errors.FloodWaitError as exc:
                 self.stats.flood_waits += 1
-                delay = self.backoff.flood_wait_delay(exc.seconds, attempt)
+                retry_delay = self.backoff.flood_wait_delay(exc.seconds, attempt)
                 logger.warning(
                     "FloodWait (%ss) on %s; backing off %.0fs (attempt %d/%d)",
                     exc.seconds,
-                    target.channel,
-                    delay,
+                    pending.channel,
+                    retry_delay,
                     attempt + 1,
                     self.max_attempts,
                 )
-                await self.sleep(delay)
+                await self.sleep(retry_delay)
                 continue
             except (errors.ChatWriteForbiddenError, errors.ChannelPrivateError) as exc:
                 self.stats.comments_failed += 1
                 logger.error(
                     "No permission to comment in %s (%s); giving up",
-                    target.channel,
+                    pending.channel,
                     type(exc).__name__,
                 )
                 return
@@ -455,7 +467,7 @@ class GrowthWorker:
                 logger.warning(
                     "Transient error (%s) on %s; retry %d/%d in %.0fs",
                     type(exc).__name__,
-                    target.channel,
+                    pending.channel,
                     attempt + 1,
                     self.max_attempts,
                     retry_delay,
@@ -466,11 +478,11 @@ class GrowthWorker:
             # Success -------------------------------------------------------
             self.stats.comments_posted += 1
             self.pacer.mark_posted(target, now=time.monotonic())
-            self.state.remember_post(target.channel, at=self.clock())
-            self.state.remember_template(target.channel, template)
+            self.state.remember_post(pending.channel, at=self.clock())
+            self.state.remember_template(pending.channel, template)
             logger.info(
                 "Comment posted in %s (thread %s): %r",
-                target.channel,
+                pending.channel,
                 pending.reply_to_msg_id,
                 text[:80],
             )
@@ -478,7 +490,7 @@ class GrowthWorker:
 
         self.stats.comments_failed += 1
         logger.error(
-            "Giving up on comment for %s after %d attempt(s)", target.channel, self.max_attempts
+            "Giving up on comment for %s after %d attempt(s)", pending.channel, self.max_attempts
         )
 
     async def _post_comment_telethon(self, discussion_entity: Any, reply_to: int, text: str) -> None:
@@ -499,3 +511,53 @@ def _event_chat_id(event: Any) -> int | None:
     if isinstance(chat, int):
         return chat
     return entity_id(getattr(event, "chat", None))
+
+
+# ---------------------------------------------------------------------- #
+# CLI entry point
+# ---------------------------------------------------------------------- #
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(description="ProxGram growth worker (Telethon userbot)")
+    parser.add_argument("--env-file", default=".env", help="Path to .env file (default: .env)")
+    parser.add_argument("--config", default=None, help="Optional JSON file with non-secret settings")
+    parser.add_argument("--templates", default=None, help="Optional JSON file with comment templates")
+    parser.add_argument("--dry-run", action="store_true", help="Log actions without posting")
+    parser.add_argument(
+        "--once", action="store_true", help="Exit after startup checks (smoke test)"
+    )
+    args = parser.parse_args(argv)
+
+    env_overrides = dict(os.environ)
+    if args.dry_run:
+        env_overrides["GROWTH_DRY_RUN"] = "1"
+    try:
+        config = load_config(
+            args.config,
+            env_file=args.env_file,
+            templates_path=args.templates,
+            environ=env_overrides,
+        )
+    except Exception as exc:  # noqa: BLE001 - config errors must print cleanly
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        return 2
+
+    configure_logging(
+        level=config.log_level,
+        secrets=(config.session_string, config.api_hash, str(config.api_id)),
+    )
+
+    worker = GrowthWorker(config)
+    try:
+        asyncio.run(worker.run())
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

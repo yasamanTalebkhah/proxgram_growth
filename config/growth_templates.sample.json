@@ -1,5 +1,5 @@
 {
-  "_comment": "Comment templates for the growth worker. Placeholders: {channel} (destination mention), {proxy_count}, {speed_note}. Keep comments short, on-topic, human and non-aggressive.",
+  "_comment": "Comment templates for the growth worker. Placeholders: {channel} (destination mention), {proxy_count}, {speed_note}. Keep comments short, on-topic, human and non-aggressive. Pass via --templates.",
   "templates": [
     "Fresh batch of fast proxies just landed in {channel} - {proxy_count} nodes, {speed_note}.",
     "Need quick market checks? Grab a low-latency node from {channel}. {proxy_count} fresh IPs online.",

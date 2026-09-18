@@ -1,20 +1,15 @@
-"""Secure logging setup with automatic credential redaction."""
+"""Logging setup with automatic credential redaction.
+
+The session string is the equivalent of full account access: if it ever
+reaches logs, crash reports or CI output, the account is compromised.
+Every handler attached here scrubs known secrets from all records.
+"""
 
 from __future__ import annotations
 
 import logging
 import re
 from typing import Iterable
-
-# We deliberately refuse to log these values. The session string is the
-# equivalent of a full account takeover credential: if it ever reaches
-# logs, crash reports or CI output, the account is compromised.
-SENSITIVE_ENV_KEYS = (
-    "SESSION_STRING",
-    "API_HASH",
-    "API_ID",
-    "GROWTH_TG_PROXY",
-)
 
 _MARKER = "«redacted»"
 
@@ -27,11 +22,10 @@ def build_secret_patterns(values: Iterable[str]) -> list[re.Pattern[str]]:
             continue
         escaped = re.escape(value)
         patterns.append(re.compile(escaped))
-        # Also redact base64url fragments of a session string, so partially
-        # rotated or truncated credentials never leak either.
+        # Also redact long fragments, so truncated/partial credentials in
+        # tracebacks never leak either.
         if len(value) >= 24:
-            chunk = escaped[:24]
-            patterns.append(re.compile(chunk))
+            patterns.append(re.compile(escaped[:24]))
     return patterns
 
 
@@ -46,7 +40,9 @@ class SecretFilter(logging.Filter):
         if self._patterns:
             record.msg = self._scrub(record.msg)
             if record.args:
-                record.args = tuple(self._scrub(arg) if isinstance(arg, str) else arg for arg in record.args)
+                record.args = tuple(
+                    self._scrub(arg) if isinstance(arg, str) else arg for arg in record.args
+                )
         return True
 
     def _scrub(self, value: object) -> str:
@@ -89,5 +85,4 @@ def configure_logging(
 
 def redact(text: str, secrets: Iterable[str]) -> str:
     """Utility for scrubbing secrets from arbitrary strings (e.g. exceptions)."""
-    filter_ = SecretFilter(secrets)
-    return filter_._scrub(text)
+    return SecretFilter(secrets)._scrub(text)

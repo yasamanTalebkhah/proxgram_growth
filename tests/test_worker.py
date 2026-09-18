@@ -22,10 +22,10 @@ from conftest import (
     make_worker,
     seed_channel_ids,
 )
-from proxgram_growth.backoff import BackoffPolicy
-from proxgram_growth.rate_limit import GlobalPacer, PerTargetPacer
-from proxgram_growth.state import StateStore
-from proxgram_growth.worker import entity_id
+from backoff import BackoffPolicy
+from rate_limit import GlobalPacer, PerTargetPacer
+from state_manager import StateManager
+from main import entity_id
 
 
 # --------------------------------------------------------------------- #
@@ -149,8 +149,8 @@ async def test_per_target_cooldown_blocks_second_comment(seeded_worker):
     worker._comment_poster = poster
     worker.sleep = FakeSleep()
 
-    for _ in range(2):
-        await worker._handle_event(make_event(MARKED_CHANNEL, make_message(post=True, id=7)))
+    for post_id in (7, 8):
+        await worker._handle_event(make_event(MARKED_CHANNEL, make_message(post=True, id=post_id)))
         await drain(worker)
 
     assert poster.count == 1
@@ -164,7 +164,7 @@ async def test_persisted_state_cooldown_survives_restart(tmp_path):
     config = make_config()
 
     # First run: post a comment (persisted via clock).
-    state = StateStore(str(state_file))
+    state = StateManager(str(state_file))
     worker = make_worker(config, state=state)
     seed_channel_ids(worker)
     poster = Poster()
@@ -175,7 +175,7 @@ async def test_persisted_state_cooldown_survives_restart(tmp_path):
     assert poster.count == 1
 
     # Second run: fresh worker, same state file, seconds later.
-    worker2 = make_worker(config, state=StateStore(str(state_file)))
+    worker2 = make_worker(config, state=StateManager(str(state_file)))
     seed_channel_ids(worker2)
     poster2 = Poster()
     worker2._comment_poster = poster2
@@ -219,7 +219,7 @@ async def test_no_immediate_template_repeat(seeded_worker):
     # Reset cooldown pacing between posts.
     for i in range(2):
         worker.pacer = PerTargetPacer(rng=worker.rng)
-        worker.state = StateStore(None)
+        worker.state = StateManager(None)
         await worker._handle_event(make_event(MARKED_CHANNEL, make_message(post=True, id=i + 1)))
         await drain(worker)
 
@@ -410,13 +410,15 @@ def make_reply(msg_id: int):
 
 
 def _pending(worker, *, reply_to: int = 1):
-    from proxgram_growth.worker import PendingComment
+    from main import PendingComment
 
     target = worker.config.targets[0]
     return PendingComment(
         target=target,
+        channel=target.channel,
         discussion_entity=object(),
         discussion_id=MARKED_DISCUSSION,
         reply_to_msg_id=reply_to,
+        post_id=reply_to,
         context={"channel": "@proxgram", "proxy_count": 10, "speed_note": "fast"},
     )

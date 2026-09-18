@@ -6,7 +6,7 @@ import random
 
 import pytest
 
-from proxgram_growth.backoff import BackoffPolicy
+from backoff import BackoffPolicy
 
 
 def test_delay_grows_exponentially():

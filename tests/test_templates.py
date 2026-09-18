@@ -6,7 +6,7 @@ import random
 
 import pytest
 
-from proxgram_growth.templates import (
+from templates import (
     DEFAULT_TEMPLATES,
     TemplateError,
     render_random_with_template,
@@ -68,7 +68,7 @@ def test_avoid_falls_back_when_single_template():
 
 
 def test_render_random_returns_text_only():
-    from proxgram_growth.templates import render_random
+    from templates import render_random
 
     text = render_random(DEFAULT_TEMPLATES, CONTEXT, rng=random.Random(3))
     assert isinstance(text, str) and "@proxgram" in text

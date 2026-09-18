@@ -15,8 +15,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from telethon.tl.types import Channel, Chat  # noqa: E402
 
-from proxgram_growth.config import Config, TargetConfig  # noqa: E402
-from proxgram_growth.templates import DEFAULT_TEMPLATES  # noqa: E402
+from templates import DEFAULT_TEMPLATES  # noqa: E402
 
 # Marked ids matching Telethon conventions: PeerChannel(123) -> -1000000000123,
 # PeerChat(456) -> -456.
@@ -29,12 +28,7 @@ class FakeChannel(Channel):
 
     def __init__(self, raw_id: int) -> None:
         super().__init__(
-            id=raw_id,
-            title="News",
-            broadcast=True,
-            megagroup=False,
-            photo=None,
-            date=None,
+            id=raw_id, title="News", broadcast=True, megagroup=False, photo=None, date=None
         )
 
 
@@ -51,13 +45,6 @@ class FakeChat(Chat):
             date=None,
             version=1,
         )
-
-
-def fake_get_peer_id(entity, add_mark=True):
-    """Deterministic marked-id helper mirroring Telethon conventions."""
-    if getattr(entity, "broadcast", False):
-        return -(1_000_000_000_000 + entity.id)
-    return -abs(entity.id)
 
 
 class FakeClient:
@@ -129,16 +116,16 @@ class Poster:
                 raise outcome
 
 
-def make_config(**overrides) -> Config:
+def make_config(**overrides):
+    from config import Config, TargetConfig
+
     defaults = dict(
         api_id=1,
         api_hash="a" * 32,
         session_string="session-string-for-tests-0000",
         destination_channel="@proxgram",
         targets=(
-            TargetConfig(
-                channel="@news", cooldown=600, jitter=0, delay_min=0, delay_max=0
-            ),
+            TargetConfig(channel="@news", cooldown=600, jitter=0, delay_min=0, delay_max=0),
         ),
         templates=DEFAULT_TEMPLATES,
         state_file=None,
@@ -156,14 +143,14 @@ def make_config(**overrides) -> Config:
 
 
 def make_worker(config=None, *, client=None, sleep=None, poster=None, state=None):
-    from proxgram_growth.state import StateStore
-    from proxgram_growth.worker import GrowthWorker
+    from main import GrowthWorker
+    from state_manager import StateManager
 
     return GrowthWorker(
         config or make_config(),
         client=client,
         rng=random.Random(1234),
-        state=state or StateStore(None),
+        state=state or StateManager(None),
         sleep=sleep or FakeSleep(),
         comment_poster=poster,
         max_attempts=3,

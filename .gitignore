@@ -1,14 +1,26 @@
-# Secrets & local config
+# --- Secrets & environment ------------------------------------------------ #
 .env
 .env.*
-!.env.growth.example
-config/growth_worker.json
-config/growth_templates.json
-var/
+!.env.example
+*.session
+*.session-journal
 
-# Python
+# --- Runtime state & caches ----------------------------------------------- #
+data/
+var/
+*.log
 __pycache__/
 *.py[cod]
-.venv/
+*.egg-info/
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# --- OS / editor noise ------------------------------------------------------ #
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.freebuff/

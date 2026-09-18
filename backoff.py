@@ -5,7 +5,11 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass, field
 
-from .config import DEFAULT_BACKOFF_BASE, DEFAULT_BACKOFF_FACTOR, DEFAULT_BACKOFF_MAX
+from config import (
+    DEFAULT_BACKOFF_BASE,
+    DEFAULT_BACKOFF_FACTOR,
+    DEFAULT_BACKOFF_MAX,
+)
 
 
 @dataclass

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import random
 
-from proxgram_growth.config import TargetConfig
-from proxgram_growth.rate_limit import GlobalPacer, HumanDelay, PerTargetPacer
+from config import TargetConfig
+from rate_limit import GlobalPacer, HumanDelay, PerTargetPacer
 
 from conftest import make_config
 

@@ -15,7 +15,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 
-from .config import TargetConfig
+from config import TargetConfig
 
 
 class RateLimitExceeded(Exception):
@@ -43,9 +43,7 @@ class PerTargetPacer:
         window = target.cooldown + self._rng.uniform(0, max(0, target.jitter))
         return last + window
 
-    def acquire(
-        self, target: TargetConfig, *, now: float | None = None
-    ) -> float:
+    def acquire(self, target: TargetConfig, *, now: float | None = None) -> float:
         """Reserve the next slot for this target.
 
         Returns the wait (seconds, >= 0) before the comment may be posted.

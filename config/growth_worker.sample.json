@@ -1,18 +1,5 @@
 {
-  "_comment": "ProxGram growth worker configuration. Non-secret settings only: API_ID, API_HASH and SESSION_STRING always come from the environment (or your secret store). Copy to config/growth_worker.json and adjust.",
+  "_comment": "ProxGram growth worker — non-secret settings. Secrets (TELEGRAM_API_ID, TELEGRAM_API_HASH, SESSION_STRING) only ever come from the environment or .env. Copy to config/growth_worker.json and pass --config.",
   "GROWTH_TARGET_CHANNELS": "@example_news, @markets_daily",
-  "GROWTH_DESTINATION_CHANNEL": "@proxgram",
-  "GROWTH_PER_CHANNEL_COOLDOWN": 600,
-  "GROWTH_PER_CHANNEL_JITTER": 120,
-  "GROWTH_DELAY_MIN": 5,
-  "GROWTH_DELAY_MAX": 20,
-  "GROWTH_GLOBAL_WINDOW": 3600,
-  "GROWTH_GLOBAL_MAX": 12,
-  "GROWTH_BACKOFF_BASE": 30,
-  "GROWTH_BACKOFF_FACTOR": 2.0,
-  "GROWTH_BACKOFF_MAX": 3600,
-  "GROWTH_STATE_FILE": "var/growth_state.json",
-  "GROWTH_LOG_LEVEL": "INFO",
-  "GROWTH_DRY_RUN": false,
-  "GROWTH_REDACT_LOGS": true
+  "GROWTH_DESTINATION_CHANNEL": "@proxgram"
 }
