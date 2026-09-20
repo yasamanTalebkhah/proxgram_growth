@@ -4,6 +4,9 @@
 !.env.example
 *.session
 *.session-journal
+mykey.txt
+*.key
+*.pem
 
 # --- Runtime state & caches ----------------------------------------------- #
 data/
