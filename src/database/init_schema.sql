@@ -16,13 +16,17 @@ CREATE TABLE IF NOT EXISTS accounts (
 CREATE TABLE IF NOT EXISTS tasks (
     id SERIAL PRIMARY KEY,
     account_id INTEGER REFERENCES accounts(id) ON DELETE CASCADE,
-    task_type VARCHAR(100) NOT NULL,
+    target VARCHAR(255),
+    action_type VARCHAR(50),
     payload JSONB DEFAULT '{}'::jsonb,
-    status VARCHAR(50) DEFAULT 'pending',
-    attempts INTEGER DEFAULT 0,
+    status VARCHAR(50) DEFAULT 'PENDING',
+    priority INTEGER DEFAULT 0,
+    retry_count INTEGER DEFAULT 0,
+    error_message TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     scheduled_at TIMESTAMP WITH TIME ZONE,
-    executed_at TIMESTAMP WITH TIME ZONE
+    executed_at TIMESTAMP WITH TIME ZONE,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS system_logs (
