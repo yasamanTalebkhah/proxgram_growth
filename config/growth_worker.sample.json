@@ -1,5 +1,0 @@
-{
-  "_comment": "ProxGram growth worker — non-secret settings. Secrets (TELEGRAM_API_ID, TELEGRAM_API_HASH, SESSION_STRING) only ever come from the environment or .env. Copy to config/growth_worker.json and pass --config.",
-  "GROWTH_TARGET_CHANNELS": "@example_news, @markets_daily",
-  "GROWTH_DESTINATION_CHANNEL": "@proxgram"
-}
