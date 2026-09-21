@@ -1,0 +1,22 @@
+# Never bake secrets or local artifacts into the image
+.env
+.env.*
+!.env.example
+*.session
+*.session-journal
+mykey.txt
+*.key
+*.pem
+
+# Local dev artifacts
+.git
+.venv
+venv
+data/
+var/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+tests/
