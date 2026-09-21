@@ -64,4 +64,4 @@ jobs:
           REDIS_HOST: localhost
           REDIS_PORT: 6379
         run: |
-          pytest tests/ -v
+          python -m pytest tests/ -v
