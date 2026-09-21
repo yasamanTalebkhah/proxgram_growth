@@ -45,7 +45,10 @@ docker compose build worker && docker compose up -d --no-deps worker
 5. Import accounts: `python -m scripts.import_account --phone +98... --session "<StringSession>"`
 6. Start the worker: `docker compose up -d --build worker`.
 
-## Incident Response
+### 5. Smoke test after deploy
+With the worker **stopped**: `docker compose stop worker && ./scripts/smoke_seed.sh`
+— seeds one mock account + one PENDING task, prints the queue and the
+metrics report, then removes the test rows. Re-start the worker afterwards.
 
 ### Circuit breaker tripped (`CIRCUIT_BREAKER_TRIPPED` in logs)
 1. Check `system_logs` for the last `WORKER_ERROR` messages to find the root cause.
