@@ -1,24 +1,28 @@
-import asyncio
-import logging
 import os
 import sys
+import asyncio
+import logging
 
-# Ensure project root is in sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from telethon import TelegramClient
 from telethon.tl.functions.messages import GetHistoryRequest
-
 from src.accounts.manager import AccountManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+CLEAN_SUBSTRINGS = [
+    "free", "no limits", "good news", "birds are singing",
+    "هیچ محدودیتی", "آزاد", "حساب شما مشکلی ندارد",
+    "вас нет никаких ограничений", "свободен"
+]
+
 async def check_spambot(client: TelegramClient) -> bool:
     try:
         spambot = await client.get_input_entity("SpamBot")
         await client.send_message(spambot, "/start")
-        await asyncio.sleep(2)
+        await asyncio.sleep(3)
         history = await client(GetHistoryRequest(
             peer=spambot,
             offset_id=0,
@@ -31,9 +35,7 @@ async def check_spambot(client: TelegramClient) -> bool:
         ))
         if history.messages:
             text = history.messages[0].message.lower()
-            if "free" in text or "no limits" in text or "good news" in text:
-                return True
-            return False
+            return any(sub in text for sub in CLEAN_SUBSTRINGS)
         return True
     except Exception as e:
         logger.warning(f"SpamBot verification skipped due to error: {e}")
@@ -62,6 +64,13 @@ async def run_healthchecks():
             await client.connect()
             if not await client.is_user_authorized():
                 logger.error(f"Account {phone} is not authorized. Marking RESTRICTED.")
+                manager.update_account_status(acc_id, "RESTRICTED", failure_increment=True)
+                await client.disconnect()
+                continue
+
+            me = await client.get_me()
+            if getattr(me, "restricted", False):
+                logger.warning(f"Account {phone} native restriction flag detected. Marking RESTRICTED.")
                 manager.update_account_status(acc_id, "RESTRICTED", failure_increment=True)
                 await client.disconnect()
                 continue
