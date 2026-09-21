@@ -2,8 +2,12 @@
 
 CREATE TABLE IF NOT EXISTS accounts (
     id SERIAL PRIMARY KEY,
-    username VARCHAR(100) UNIQUE NOT NULL,
-    status VARCHAR(50) DEFAULT 'active',
+    phone_number VARCHAR(32) UNIQUE NOT NULL,
+    username VARCHAR(100),
+    session_string TEXT,
+    proxy_config JSONB,
+    status VARCHAR(50) DEFAULT 'ACTIVE',
+    failure_count INTEGER DEFAULT 0,
     metadata JSONB DEFAULT '{}'::jsonb,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
