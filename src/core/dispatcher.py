@@ -5,6 +5,7 @@ import logging
 from typing import Optional, Dict, Any
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError, UserBannedInChannelError, ChatWriteForbiddenError
+from telethon.tl.types import PeerChannel, PeerChat
 from src.database.connection import get_db_connection
 from src.accounts.manager import AccountManager
 from src.core.rate_limiter import AntiSpamLimiter
@@ -64,13 +65,14 @@ class TaskDispatcher:
             SET status = %s,
                 error_message = %s,
                 retry_count = CASE WHEN %s = 'FAILED' THEN retry_count + 1 ELSE retry_count END,
+                executed_at = CASE WHEN %s = 'COMPLETED' THEN NOW() ELSE executed_at END,
                 updated_at = NOW()
             WHERE id = %s;
         """
         try:
             with get_db_connection() as conn:
                 with conn.cursor() as cur:
-                    cur.execute(query, (status, error_message, status, task_id))
+                    cur.execute(query, (status, error_message, status, status, task_id))
                 conn.commit()
         except Exception as e:
             logger.error(f"Error updating task {task_id} status to {status}: {e}")
@@ -85,7 +87,7 @@ class TaskDispatcher:
         message_text = SpintaxEngine.render_promo(template, channel_link, payload.get("extra", {}))
 
         await self.limiter.wait_jitter()
-        entity = await client.get_input_entity(target)
+        entity = await self._resolve_entity(client, target)
 
         if action == "SEND_MESSAGE":
             await client.send_message(entity, message_text)
@@ -97,6 +99,36 @@ class TaskDispatcher:
 
         logger.info(f"Task {task['id']} executed successfully on {target}")
         return True
+
+    @staticmethod
+    def _parse_numeric_target(target: str):
+        """Return (peer_type, id) for numeric/-100-marked targets, else None."""
+        s = str(target).strip()
+        try:
+            if s.startswith("-100") and s[4:].isdigit():
+                return "channel", int(s[4:])
+            if s.lstrip("-").isdigit():
+                return "chat", int(s)
+            return None
+        except ValueError:
+            return None
+
+    async def _resolve_entity(self, client: TelegramClient, target: str):
+        """Resolve a target without depending on a warm session entity cache.
+
+        Cold sessions cannot resolve marked channel ids via get_input_entity,
+        but PeerChannel/PeerChat lookups work from member access alone.
+        Falls back to the default path for @usernames and other forms.
+        """
+        parsed = self._parse_numeric_target(target)
+        if parsed:
+            kind, ident = parsed
+            peer = PeerChannel(ident) if kind == "channel" else PeerChat(ident)
+            try:
+                return await client.get_entity(peer)
+            except ValueError as exc:
+                logger.warning(f"Peer-based resolution failed for {target}: {exc}")
+        return await client.get_input_entity(target)
 
     async def process_next_task(self) -> bool:
         if self.limiter.is_quiet_hours():

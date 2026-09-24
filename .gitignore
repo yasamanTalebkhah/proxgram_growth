@@ -7,6 +7,12 @@
 mykey.txt
 *.key
 *.pem
+.telegram_login_state.json
+qr_login.txt
+qr_login.png
+qr_login.log
+qr_preview.html
+qr_login.html
 
 # --- Runtime state & caches ----------------------------------------------- #
 data/
