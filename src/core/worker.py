@@ -59,11 +59,13 @@ class GrowthWorker:
             logger.error(f"Task seeding failed (will retry next interval): {exc}")
 
     def _run_sweeper(self):
-        """Requeue tasks orphaned in RUNNING by a dead worker (best-effort).
+        """Maintenance pass: orphan recovery + failed-task requeue.
 
-        Runs on boot and every GROWTH_SWEEP_INTERVAL_SECONDS. Per-task audit
-        rows are written by the dispatcher; errors here never count toward
-        the circuit breaker.
+        Runs on boot and every GROWTH_SWEEP_INTERVAL_SECONDS. Recovers
+        RUNNING claims orphaned by dead workers, then requeues FAILED
+        tasks whose exponential-backoff window has elapsed. Per-task
+        audit rows are written by the dispatcher; errors here never
+        count toward the circuit breaker.
         """
         try:
             counts = self.dispatcher.sweep_stale_tasks()
@@ -75,6 +77,12 @@ class GrowthWorker:
                 )
         except Exception as exc:
             logger.error(f"Stale-task sweep failed (will retry next interval): {exc}")
+        try:
+            requeued = self.dispatcher.requeue_failed_tasks()
+            if requeued:
+                logger.info(f"Requeue pass returned {requeued} failed task(s) to PENDING.")
+        except Exception as exc:
+            logger.error(f"Failed-task requeue pass error: {exc}")
 
     def stop(self, signum=None, frame=None):
         logger.info("Shutdown signal received. Stopping worker gracefully...")

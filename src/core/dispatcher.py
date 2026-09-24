@@ -77,7 +77,7 @@ class TaskDispatcher:
         except Exception as e:
             logger.error(f"Error updating task {task_id} status to {status}: {e}")
 
-    def sweep_stale_tasks(self, timeout_minutes: Optional[int] = None, max_retries: int = 3) -> Dict[str, int]:
+    def sweep_stale_tasks(self, timeout_minutes: Optional[int] = None, max_retries: Optional[int] = None) -> Dict[str, int]:
         """Recover tasks orphaned in RUNNING by a dead/interrupted worker.
 
         A RUNNING task whose updated_at is older than the claim timeout
@@ -91,6 +91,8 @@ class TaskDispatcher:
         """
         if timeout_minutes is None:
             timeout_minutes = int(os.getenv("GROWTH_CLAIM_TIMEOUT_MINUTES", "10"))
+        if max_retries is None:
+            max_retries = int(os.getenv("GROWTH_MAX_RETRIES", "3"))
         counts = {"recovered": 0, "failed": 0}
         query = """
             WITH stale AS (
@@ -180,6 +182,59 @@ class TaskDispatcher:
                 conn.commit()
         except Exception as e:
             logger.error(f"Delivery audit log failure for task {task_id}: {e}")
+
+    def requeue_failed_tasks(self, max_retries: Optional[int] = None, base_delay_seconds: Optional[int] = None) -> int:
+        """Requeue transiently FAILED tasks once their backoff window elapses.
+
+        Exponential backoff: base_delay * (2 ** retry_count), evaluated in
+        SQL so host CLI and worker agree on timing to the second. Tasks that
+        have already burned GROWTH_MAX_RETRIES attempts stay terminally
+        FAILED; everything else returns to PENDING with its last error
+        message preserved for context. One TASK_REQUEUED audit row per
+        requeued task. Returns the number of requeued tasks.
+        """
+        if max_retries is None:
+            max_retries = int(os.getenv("GROWTH_MAX_RETRIES", "3"))
+        if base_delay_seconds is None:
+            base_delay_seconds = int(os.getenv("GROWTH_REQUEUE_BASE_DELAY_SECONDS", "60"))
+        query = """
+            WITH eligible AS (
+                SELECT id
+                FROM tasks
+                WHERE status = 'FAILED'
+                  AND retry_count < %s
+                  AND updated_at < NOW() - (%s * POWER(2, retry_count) * INTERVAL '1 second')
+                FOR UPDATE SKIP LOCKED
+            )
+            UPDATE tasks t
+            SET status = 'PENDING',
+                updated_at = NOW()
+            FROM eligible e
+            WHERE t.id = e.id
+            RETURNING t.id, t.retry_count;
+        """
+        requeued = 0
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(query, (max_retries, base_delay_seconds))
+                    rows = cur.fetchall()
+                    for task_id, retry_count in rows:
+                        requeued += 1
+                        delay = base_delay_seconds * (2 ** retry_count)
+                        cur.execute(
+                            "INSERT INTO system_logs (level, event_type, message, created_at) "
+                            "VALUES (%s, %s, %s, NOW());",
+                            ("INFO", "TASK_REQUEUED",
+                             f"Task #{task_id} requeued after failure "
+                             f"(retry_count={retry_count}, backoff={delay}s elapsed)"),
+                        )
+                conn.commit()
+                if requeued:
+                    logger.info(f"Requeued {requeued} failed task(s) after backoff.")
+        except Exception as e:
+            logger.error(f"Error requeuing failed tasks: {e}")
+        return requeued
 
     async def execute_task(self, client: TelegramClient, task: Dict[str, Any]) -> bool:
         target = task["target"]
