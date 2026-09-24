@@ -5,6 +5,7 @@ TelegramClient instances (with optional per-account proxy binding) and
 tracks account health state back into the database.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -13,12 +14,29 @@ from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 from telethon import TelegramClient
 from telethon.sessions import StringSession
+from telethon.network import (
+    ConnectionTcpAbridged,
+    ConnectionTcpFull,
+    ConnectionTcpObfuscated,
+)
 
 from src.database.connection import get_db_connection
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+
+# MTProto transports tried in order by connect_with_fallback(). Abridged
+# often survives DPI that severs Full handshakes; Obfuscated wraps the
+# stream to look like random traffic. Authorization is transport-agnostic,
+# so switching costs nothing but a reconnect.
+TRANSPORT_FALLBACKS = (
+    ConnectionTcpAbridged,
+    ConnectionTcpFull,
+    ConnectionTcpObfuscated,
+)
+
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 20
 
 
 class AccountManager:
@@ -29,6 +47,10 @@ class AccountManager:
         self.api_hash = os.getenv("TELEGRAM_API_HASH")
         if self.api_id:
             self.api_id = int(self.api_id)
+        # Hard cap for every connection attempt (see connect_with_fallback).
+        self.connect_timeout = int(
+            os.getenv("GROWTH_CONNECT_TIMEOUT_SECONDS", str(DEFAULT_CONNECT_TIMEOUT_SECONDS))
+        )
 
     def get_active_accounts(self) -> List[Dict[str, Any]]:
         query = """
@@ -58,7 +80,10 @@ class AccountManager:
         return accounts
 
     def create_client(
-        self, session_string: str, proxy: Optional[Dict[str, Any]] = None
+        self,
+        session_string: str,
+        proxy: Optional[Dict[str, Any]] = None,
+        connection_cls: Any = None,
     ) -> TelegramClient:
         if not self.api_id or not self.api_hash:
             raise ValueError(
@@ -87,7 +112,52 @@ class AccountManager:
                 proxy.get("password"),
             )
 
-        return TelegramClient(session, self.api_id, self.api_hash, proxy=proxy_param)
+        if connection_cls is None:
+            connection_cls = TRANSPORT_FALLBACKS[0]
+
+        # connection_retries=1: internal transport retries are disabled on
+        # purpose — connect_with_fallback() owns retry/fallback policy and
+        # every attempt is bounded by self.connect_timeout.
+        return TelegramClient(
+            session,
+            self.api_id,
+            self.api_hash,
+            proxy=proxy_param,
+            connection=connection_cls,
+            timeout=self.connect_timeout,
+            connection_retries=1,
+            retry_delay=1,
+        )
+
+    async def connect_with_fallback(self, client: TelegramClient) -> TelegramClient:
+        """Connect the client, falling through TRANSPORT_FALLBACKS on failure.
+
+        Each attempt is hard-bounded by GROWTH_CONNECT_TIMEOUT_SECONDS via
+        asyncio.wait_for, so a silently dropped MTProto handshake can never
+        hang the dispatcher loop. Raises ConnectionError when every
+        transport in the sequence fails.
+        """
+        last_exc: Optional[BaseException] = None
+        for transport in TRANSPORT_FALLBACKS:
+            client._connection = transport
+            try:
+                await asyncio.wait_for(client.connect(), timeout=self.connect_timeout)
+                return client
+            except (asyncio.TimeoutError, ConnectionError, OSError, RuntimeError) as exc:
+                last_exc = exc
+                logger.warning(
+                    f"Transport {transport.__name__} failed within "
+                    f"{self.connect_timeout}s: {exc}"
+                )
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+        raise ConnectionError(
+            f"All {len(TRANSPORT_FALLBACKS)} transports failed "
+            f"(tried: {', '.join(t.__name__ for t in TRANSPORT_FALLBACKS)}); "
+            f"last error: {last_exc}"
+        )
 
     def update_account_status(
         self, account_id: int, status: str, failure_increment: bool = False

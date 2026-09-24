@@ -210,7 +210,7 @@ class TaskDispatcher:
         client = self.account_manager.create_client(selected_account["session_string"], selected_account["proxy"])
 
         try:
-            await client.connect()
+            await self.account_manager.connect_with_fallback(client)
             if not await client.is_user_authorized():
                 self.account_manager.update_account_status(acc_id, "RESTRICTED", failure_increment=True)
                 self.update_task_status(task["id"], "PENDING", error_message="Selected account unauthorized")
@@ -223,6 +223,17 @@ class TaskDispatcher:
             await client.disconnect()
             return success
 
+        except ConnectionError as ce:
+            # All transports failed — an egress problem, not a task problem.
+            # Requeue without burning retry_count so the task runs as soon as
+            # the network path recovers.
+            logger.warning(f"All transports failed on task {task['id']}: {ce}. Requeuing.")
+            self.update_task_status(task["id"], "PENDING", error_message=f"All transports failed: {ce}")
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            return False
         except FloodWaitError as fwe:
             logger.warning(f"FloodWait encountered on task {task['id']}: {fwe.seconds}s. Requeuing task.")
             self.update_task_status(task["id"], "PENDING", error_message=f"FloodWait: {fwe.seconds}s")
