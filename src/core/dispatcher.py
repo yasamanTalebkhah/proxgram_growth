@@ -137,6 +137,50 @@ class TaskDispatcher:
             logger.error(f"Error sweeping stale tasks: {e}")
         return counts
 
+    async def _verify_delivery(self, client: TelegramClient, entity, task: Dict[str, Any], expected_id: int) -> Optional[int]:
+        """Confirm a sent message is physically present in the target history.
+
+        Fetches the most recent messages once and checks the expected
+        telegram message id among them (it may not be the very latest if
+        another post raced us). Strictly fail-safe: restricted entities,
+        cold-session lookup failures or transient API errors degrade to
+        'unverified' (None) with a WARNING — never an exception — so a
+        read-restricted target can never crash the worker loop.
+        """
+        try:
+            await asyncio.sleep(1)  # brief propagation grace before read-back
+            recent = await client.get_messages(entity, limit=5)
+            if any(getattr(m, "id", None) == expected_id for m in (recent or [])):
+                return expected_id
+            logger.warning(
+                f"Delivery read-back: message {expected_id} not found in recent "
+                f"history of {task['target']} (task {task['id']}) — unverified."
+            )
+            return None
+        except Exception as exc:
+            logger.warning(
+                f"Delivery read-back unavailable for task {task['id']} "
+                f"({task['target']}): {type(exc).__name__}: {exc}"
+            )
+            return None
+
+    def _record_delivery(self, task_id: int, target: str, message_id: int):
+        """Write a DELIVERY_VERIFIED audit row with the telegram message id."""
+        query = """
+            INSERT INTO system_logs (level, event_type, message, created_at)
+            VALUES ('INFO', 'DELIVERY_VERIFIED', %s, NOW());
+        """
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(query, (
+                        f"Task #{task_id} delivered to {target}: "
+                        f"telegram message_id={message_id} (read-back confirmed)",
+                    ))
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Delivery audit log failure for task {task_id}: {e}")
+
     async def execute_task(self, client: TelegramClient, task: Dict[str, Any]) -> bool:
         target = task["target"]
         action = task["action_type"]
@@ -150,7 +194,12 @@ class TaskDispatcher:
         entity = await self._resolve_entity(client, target)
 
         if action == "SEND_MESSAGE":
-            await client.send_message(entity, message_text)
+            sent = await client.send_message(entity, message_text)
+            expected_id = getattr(sent, "id", None)
+            if expected_id is not None:
+                confirmed = await self._verify_delivery(client, entity, task, expected_id)
+                if confirmed is not None:
+                    self._record_delivery(task["id"], target, confirmed)
         elif action == "COMMENT_REPLY":
             reply_to_id = payload.get("reply_to_msg_id")
             await client.send_message(entity, message_text, reply_to=reply_to_id)
