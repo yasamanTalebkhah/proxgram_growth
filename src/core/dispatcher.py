@@ -77,6 +77,66 @@ class TaskDispatcher:
         except Exception as e:
             logger.error(f"Error updating task {task_id} status to {status}: {e}")
 
+    def sweep_stale_tasks(self, timeout_minutes: Optional[int] = None, max_retries: int = 3) -> Dict[str, int]:
+        """Recover tasks orphaned in RUNNING by a dead/interrupted worker.
+
+        A RUNNING task whose updated_at is older than the claim timeout
+        (GROWTH_CLAIM_TIMEOUT_MINUTES, default 10) can no longer be in
+        flight: claims flip to a terminal status within seconds, and a
+        worker that dies mid-send never reports back. Each stale claim is
+        atomically requeued as PENDING — or marked FAILED once it has
+        exhausted max_retries attempts — with a system_logs audit row.
+
+        Returns {"recovered": <requeued>, "failed": <terminal>}.
+        """
+        if timeout_minutes is None:
+            timeout_minutes = int(os.getenv("GROWTH_CLAIM_TIMEOUT_MINUTES", "10"))
+        counts = {"recovered": 0, "failed": 0}
+        query = """
+            WITH stale AS (
+                SELECT id
+                FROM tasks
+                WHERE status = 'RUNNING'
+                  AND updated_at < NOW() - (%s * INTERVAL '1 minute')
+                FOR UPDATE SKIP LOCKED
+            )
+            UPDATE tasks t
+            SET status = CASE WHEN t.retry_count >= %s THEN 'FAILED' ELSE 'PENDING' END,
+                error_message = CASE WHEN t.retry_count >= %s
+                    THEN 'Claim timeout: orphaned RUNNING task exceeded max retries'
+                    ELSE 'Claim timeout: orphaned RUNNING task recovered to PENDING' END,
+                retry_count = t.retry_count + 1,
+                updated_at = NOW()
+            FROM stale s
+            WHERE t.id = s.id
+            RETURNING t.id, t.status, t.retry_count;
+        """
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(query, (timeout_minutes, max_retries, max_retries))
+                    rows = cur.fetchall()
+                    for task_id, new_status, new_retry_count in rows:
+                        counts["recovered" if new_status == "PENDING" else "failed"] += 1
+                        outcome = ("marked FAILED (max retries exhausted)"
+                                   if new_status == "FAILED" else "requeued as PENDING")
+                        cur.execute(
+                            "INSERT INTO system_logs (level, event_type, message, created_at) "
+                            "VALUES (%s, %s, %s, NOW());",
+                            ("WARNING", "STALE_TASK_RECOVERED",
+                             f"Task #{task_id} orphaned in RUNNING beyond {timeout_minutes}m "
+                             f"claim timeout -> {outcome} (retry_count={new_retry_count})"),
+                        )
+                conn.commit()
+                if counts["recovered"] or counts["failed"]:
+                    logger.warning(
+                        f"Claim-timeout sweeper recovered {counts['recovered']} orphaned task(s), "
+                        f"marked {counts['failed']} FAILED."
+                    )
+        except Exception as e:
+            logger.error(f"Error sweeping stale tasks: {e}")
+        return counts
+
     async def execute_task(self, client: TelegramClient, task: Dict[str, Any]) -> bool:
         target = task["target"]
         action = task["action_type"]

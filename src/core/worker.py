@@ -24,6 +24,8 @@ class GrowthWorker:
         self.consecutive_failures = 0
         self.scheduler_interval = int(os.getenv("SCHEDULER_INTERVAL", "3600"))
         self.last_seed_monotonic: float | None = None
+        self.sweep_interval = int(os.getenv("GROWTH_SWEEP_INTERVAL_SECONDS", "300"))
+        self.last_sweep_monotonic: float | None = None
 
     def record_log(self, level: str, event_type: str, message: str):
         query = """
@@ -56,6 +58,24 @@ class GrowthWorker:
         except Exception as exc:
             logger.error(f"Task seeding failed (will retry next interval): {exc}")
 
+    def _run_sweeper(self):
+        """Requeue tasks orphaned in RUNNING by a dead worker (best-effort).
+
+        Runs on boot and every GROWTH_SWEEP_INTERVAL_SECONDS. Per-task audit
+        rows are written by the dispatcher; errors here never count toward
+        the circuit breaker.
+        """
+        try:
+            counts = self.dispatcher.sweep_stale_tasks()
+            self.last_sweep_monotonic = time.monotonic()
+            if counts["recovered"] or counts["failed"]:
+                logger.info(
+                    f"Sweeper recovered {counts['recovered']} orphaned task(s), "
+                    f"marked {counts['failed']} FAILED."
+                )
+        except Exception as exc:
+            logger.error(f"Stale-task sweep failed (will retry next interval): {exc}")
+
     def stop(self, signum=None, frame=None):
         logger.info("Shutdown signal received. Stopping worker gracefully...")
         self.is_running = False
@@ -64,7 +84,9 @@ class GrowthWorker:
         self.record_log("INFO", "WORKER_STARTED", "Growth daemon worker started successfully.")
         logger.info("Growth worker daemon initialized.")
 
-        # Seed the queue on boot, then refresh once per SCHEDULER_INTERVAL.
+        # Recover orphaned claims before seeding so the seeder's dedupe
+        # sees recovered PENDING tasks, then refresh both per interval.
+        self._run_sweeper()
         self._run_seeder()
 
         while self.is_running:
@@ -76,8 +98,12 @@ class GrowthWorker:
                 else:
                     await asyncio.sleep(5)
 
+                now_monotonic = time.monotonic()
+                if (self.last_sweep_monotonic is None
+                        or now_monotonic - self.last_sweep_monotonic >= self.sweep_interval):
+                    self._run_sweeper()
                 if (self.last_seed_monotonic is None
-                        or time.monotonic() - self.last_seed_monotonic >= self.scheduler_interval):
+                        or now_monotonic - self.last_seed_monotonic >= self.scheduler_interval):
                     self._run_seeder()
             except Exception as e:
                 self.consecutive_failures += 1
