@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import signal
 import asyncio
 import logging
@@ -9,6 +10,7 @@ import logging
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from src.core.dispatcher import TaskDispatcher
+from src.core.seeder import seed_tasks
 from src.database.connection import get_db_connection
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -20,6 +22,8 @@ class GrowthWorker:
         self.is_running = True
         self.failure_threshold = failure_threshold
         self.consecutive_failures = 0
+        self.scheduler_interval = int(os.getenv("SCHEDULER_INTERVAL", "3600"))
+        self.last_seed_monotonic: float | None = None
 
     def record_log(self, level: str, event_type: str, message: str):
         query = """
@@ -34,6 +38,24 @@ class GrowthWorker:
         except Exception as e:
             logger.error(f"Database logging failure: {e}")
 
+    def _run_seeder(self):
+        """Seed PENDING tasks from GROWTH_TARGET_CHANNELS (best-effort).
+
+        Runs on boot and once per SCHEDULER_INTERVAL seconds. Failures are
+        logged but never counted toward the circuit breaker — the queue
+        simply stays empty until the next interval.
+        """
+        try:
+            summary = seed_tasks()
+            self.last_seed_monotonic = time.monotonic()
+            if summary["seeded"]:
+                seeded = ", ".join(f"#{tid} {target}" for target, tid in summary["seeded"])
+                logger.info(f"Seeder queued {len(summary['seeded'])} task(s): {seeded}")
+            elif summary["skipped"]:
+                logger.info("Seeder ran: all targets already have fresh tasks (dedupe).")
+        except Exception as exc:
+            logger.error(f"Task seeding failed (will retry next interval): {exc}")
+
     def stop(self, signum=None, frame=None):
         logger.info("Shutdown signal received. Stopping worker gracefully...")
         self.is_running = False
@@ -41,6 +63,9 @@ class GrowthWorker:
     async def run(self):
         self.record_log("INFO", "WORKER_STARTED", "Growth daemon worker started successfully.")
         logger.info("Growth worker daemon initialized.")
+
+        # Seed the queue on boot, then refresh once per SCHEDULER_INTERVAL.
+        self._run_seeder()
 
         while self.is_running:
             try:
@@ -50,6 +75,10 @@ class GrowthWorker:
                     self.record_log("INFO", "TASK_PROCESSED", "Task completed cleanly.")
                 else:
                     await asyncio.sleep(5)
+
+                if (self.last_seed_monotonic is None
+                        or time.monotonic() - self.last_seed_monotonic >= self.scheduler_interval):
+                    self._run_seeder()
             except Exception as e:
                 self.consecutive_failures += 1
                 logger.error(f"Unhandled worker loop error: {e}")
