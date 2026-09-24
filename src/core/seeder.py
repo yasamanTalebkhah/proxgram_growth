@@ -1,27 +1,28 @@
-"""Task seeding engine: turn GROWTH_TARGET_CHANNELS into PENDING SEND_MESSAGE tasks.
+"""Task seeding engine: turn configured targets into PENDING SEND_MESSAGE tasks.
 
-Used by:
-  - the worker daemon (GrowthWorker calls seed_tasks() every SCHEDULER_INTERVAL),
-  - the CLI wrapper scripts/seed_tasks.py (docker compose exec worker python
-    scripts/seed_tasks.py).
+Target sources (merged, deduplicated):
+  - `target_channels` table rows where enabled = TRUE (dashboard-managed)
+  - GROWTH_TARGET_CHANNELS env var (legacy fallback)
+
+Message content comes from the active row in `message_templates`
+(dashboard Spintax Studio), falling back to the dispatcher's default.
 
 Dedupe: targets with a PENDING or COMPLETED SEND_MESSAGE task created within
 the last GROWTH_SEED_DEDUPE_HOURS (default 24) are skipped, so boot-time
-seeding, periodic seeding and manual runs never flood the queue. FAILED and
-RUNNING tasks do not block reseeding.
+seeding, periodic seeding and manual runs never flood the queue.
 """
 
-import os
-import re
 import json
 import logging
+import os
+import re
 from datetime import timedelta
 
+from src.core.settings import get_setting_int
 from src.database.connection import get_db_connection
 
 logger = logging.getLogger("seeder")
 
-DEFAULT_DEDUPE_HOURS = 24
 # Same default the dispatcher falls back to when a payload omits "template".
 DEFAULT_TEMPLATE = "{سلام|درود} دوستان! جهت دریافت نرخ لحظه‌ای و پروکسی: {channel_link}"
 DEFAULT_DESTINATION = "@proxgram"
@@ -47,6 +48,38 @@ INSERT_LOG_SQL = """
 """
 
 
+def _db_targets() -> list:
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT target FROM target_channels WHERE enabled = TRUE ORDER BY id;"
+                )
+                return [row[0] for row in cur.fetchall()]
+    except Exception as exc:
+        logger.warning(f"Could not read target_channels (falling back to env): {exc}")
+        return []
+
+
+def _env_targets() -> list:
+    raw = os.getenv("GROWTH_TARGET_CHANNELS", "")
+    return [t for t in (x.strip() for x in re.split(r"[,;\s]+", raw)) if t]
+
+
+def _active_template() -> str:
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT template FROM message_templates WHERE is_active = TRUE "
+                    "ORDER BY updated_at DESC LIMIT 1;"
+                )
+                row = cur.fetchone()
+                return row[0] if row else DEFAULT_TEMPLATE
+    except Exception:
+        return DEFAULT_TEMPLATE
+
+
 def parse_targets(raw: str) -> list:
     """Split GROWTH_TARGET_CHANNELS on commas / semicolons / whitespace."""
     return [t for t in (x.strip() for x in re.split(r"[,;\s]+", raw or "")) if t]
@@ -59,18 +92,24 @@ def seed_tasks(dedupe_hours: int | None = None, force: bool = False) -> dict:
     Returns {"seeded": [(target, task_id)], "skipped": {target: reason}}.
     """
     if dedupe_hours is None:
-        dedupe_hours = int(os.getenv("GROWTH_SEED_DEDUPE_HOURS", str(DEFAULT_DEDUPE_HOURS)))
+        dedupe_hours = get_setting_int("GROWTH_SEED_DEDUPE_HOURS")
     window = timedelta(hours=dedupe_hours)
 
-    targets = parse_targets(os.getenv("GROWTH_TARGET_CHANNELS", ""))
+    seen: set = set()
+    targets: list = []
+    for target in _db_targets() + _env_targets():
+        if target not in seen:
+            seen.add(target)
+            targets.append(target)
+
     destination = os.getenv("GROWTH_DESTINATION_CHANNEL", "").strip() or DEFAULT_DESTINATION
     summary: dict = {"seeded": [], "skipped": {}}
 
     if not targets:
-        logger.warning("GROWTH_TARGET_CHANNELS is empty — nothing to seed.")
+        logger.warning("No targets configured (target_channels table and env both empty).")
         return summary
 
-    payload = json.dumps({"template": DEFAULT_TEMPLATE, "channel_link": destination})
+    payload = json.dumps({"template": _active_template(), "channel_link": destination})
 
     with get_db_connection() as conn:
         with conn.cursor() as cur:
@@ -128,7 +167,7 @@ def main() -> int:
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Seed SEND_MESSAGE tasks from GROWTH_TARGET_CHANNELS."
+        description="Seed SEND_MESSAGE tasks from configured targets."
     )
     parser.add_argument(
         "--dedupe-hours", type=int, default=None,
@@ -154,7 +193,7 @@ def main() -> int:
         print(f"  [skipped]  target={target}  ({reason})")
 
     if not summary["seeded"] and not summary["skipped"]:
-        print("  (no targets configured — check GROWTH_TARGET_CHANNELS)")
+        print("  (no targets configured — check target_channels / GROWTH_TARGET_CHANNELS)")
         return 1
 
     _print_pending_queue()

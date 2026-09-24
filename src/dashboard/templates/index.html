@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ProxGram Growth — Dashboard</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+<style>
+  body { background: radial-gradient(ellipse at top, #0f172a 0%, #020617 55%, #000 100%); min-height: 100vh; }
+  [x-cloak] { display: none !important; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: #334155; border-radius: 8px; }
+  .spin-slow { animation: spin 1.2s linear infinite; }
+</style>
+<style type="text/tailwindcss">
+  .card { @apply bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl shadow-xl shadow-black/30; }
+  .badge { @apply inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold; }
+  .badge-ok { @apply bg-emerald-500/15 text-emerald-300 border border-emerald-400/20; }
+  .badge-warn { @apply bg-amber-500/15 text-amber-300 border border-amber-400/20; }
+  .badge-bad { @apply bg-rose-500/15 text-rose-300 border border-rose-400/20; }
+  .badge-idle { @apply bg-slate-500/15 text-slate-300 border border-slate-400/20; }
+  .btn { @apply px-3.5 py-2 rounded-xl text-sm font-medium transition-all duration-200 border border-white/10 bg-white/5 hover:bg-white/10 active:scale-95 disabled:opacity-40 disabled:pointer-events-none cursor-pointer; }
+  .btn-primary { @apply bg-emerald-500/20 text-emerald-300 border-emerald-400/20 hover:bg-emerald-500/30; }
+  .btn-danger { @apply bg-rose-500/15 text-rose-300 border-rose-400/20 hover:bg-rose-500/25; }
+  .input { @apply w-full bg-black/30 border border-white/10 rounded-xl px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-400/40; }
+  .th { @apply text-left text-xs uppercase tracking-wider text-slate-400 font-semibold px-3 py-2.5 border-b border-white/10; }
+  .td { @apply px-3 py-2.5 text-sm text-slate-200 border-b border-white/5; }
+  .tabbtn { @apply px-4 py-2 rounded-xl text-sm font-medium text-slate-400 hover:text-slate-100 hover:bg-white/5 transition cursor-pointer; }
+  .tabbtn-active { @apply bg-white/10 text-white shadow-inner; }
+  .navlink { @apply px-3 py-1.5 rounded-lg text-sm text-slate-300 hover:text-white hover:bg-white/10 transition cursor-pointer; }
+</style>
+</head>
+<body class="text-slate-200" x-data="dash()" x-init="init()" x-cloak>
+
+<!-- ============ TOP BAR ============ -->
+<header class="sticky top-0 z-40 backdrop-blur-xl bg-slate-950/60 border-b border-white/10">
+  <div class="max-w-7xl mx-auto px-4 py-3 flex flex-wrap items-center gap-3">
+    <div class="flex items-center gap-2.5 mr-2">
+      <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-emerald-400 to-teal-600 grid place-items-center text-slate-950 font-black">P</div>
+      <div>
+        <div class="font-bold text-white leading-none">ProxGram Growth</div>
+        <div class="text-[11px] text-slate-400 leading-none mt-1">control center · :8080</div>
+      </div>
+    </div>
+    <nav class="flex flex-wrap gap-1">
+      <template x-for="t in ['overview','accounts','channels','studio','tasks','settings','logs']" :key="t">
+        <button class="tabbtn" :class="tab===t && 'tabbtn-active'" @click="switchTab(t)" x-text="t[0].toUpperCase()+t.slice(1)"></button>
+      </template>
+    </nav>
+    <div class="ml-auto flex items-center gap-2">
+      <div class="hidden sm:flex items-center gap-1.5 text-xs text-slate-400 mr-1">
+        <span>auto-refresh</span>
+        <button class="btn !py-1 !px-2" :class="auto && 'btn-primary'" @click="toggleAuto()" x-text="auto ? 'ON' : 'OFF'"></button>
+        <select class="input !w-auto !py-1 !px-2" x-model.number="interval" @change="applyInterval()">
+          <option value="5">5s</option><option value="15">15s</option><option value="30">30s</option>
+        </select>
+      </div>
+      <span class="badge" :class="hp.worker?.running ? 'badge-ok' : 'badge-bad'">
+        <span class="w-1.5 h-1.5 rounded-full" :class="hp.worker?.running ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'"></span>
+        <span x-text="hp.worker?.running ? 'worker live' : 'worker down'"></span>
+      </span>
+    </div>
+  </div>
+</header>
+
+<main class="max-w-7xl mx-auto px-4 py-6">
+
+  <!-- ============ OVERVIEW ============ -->
+  <section x-show="tab==='overview'">
+    <div class="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3">
+      <template x-for="c in kpiCards()" :key="c.label">
+        <div class="card p-4">
+          <div class="text-[11px] uppercase tracking-wide text-slate-400" x-text="c.label"></div>
+          <div class="mt-1.5 text-2xl font-extrabold text-white" x-text="c.value"></div>
+          <div class="text-[11px] text-slate-500 mt-1" x-text="c.sub"></div>
+        </div>
+      </template>
+    </div>
+
+    <h2 class="text-sm font-semibold text-slate-400 uppercase tracking-wider mt-8 mb-3">System Health</h2>
+    <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+      <div class="card p-4 flex items-center justify-between">
+        <div><div class="font-semibold text-white">PostgreSQL</div><div class="text-xs text-slate-400">SSOT · tasks & audit</div></div>
+        <span class="badge" :class="hp.postgres ? 'badge-ok':'badge-bad'" x-text="hp.postgres ? 'UP':'DOWN'"></span>
+      </div>
+      <div class="card p-4 flex items-center justify-between">
+        <div><div class="font-semibold text-white">Redis</div><div class="text-xs text-slate-400">cache / broker</div></div>
+        <span class="badge" :class="hp.redis ? 'badge-ok':'badge-bad'" x-text="hp.redis ? 'UP':'DOWN'"></span>
+      </div>
+      <div class="card p-4 flex items-center justify-between">
+        <div><div class="font-semibold text-white">Worker</div>
+          <div class="text-xs text-slate-400">
+            <span x-text="hp.worker?.last_event || 'no events'"></span>
+            <span x-show="hp.worker?.seconds_ago != null" x-text="'· ' + hp.worker?.seconds_ago + 's ago'"></span>
+          </div>
+        </div>
+        <span class="badge" :class="hp.worker?.running ? 'badge-ok':'badge-bad'" x-text="hp.worker?.running ? 'RUNNING':'STOPPED'"></span>
+      </div>
+      <div class="card p-4 flex items-center justify-between">
+        <div><div class="font-semibold text-white">SOCKS proxy</div><div class="text-xs text-slate-400">user VPN inbound (probe only)</div></div>
+        <span class="badge" :class="hp.socks ? 'badge-ok':'badge-bad'" x-text="hp.socks ? 'REACHABLE':'UNREACHABLE'"></span>
+      </div>
+    </div>
+
+    <h2 class="text-sm font-semibold text-slate-400 uppercase tracking-wider mt-8 mb-3">Quick Actions</h2>
+    <div class="flex flex-wrap gap-2.5">
+      <button class="btn btn-primary" @click="seed(false)" :disabled="busy">⚡ Trigger Seeder</button>
+      <button class="btn" @click="seed(true)" :disabled="busy">⚡ Seeder (force)</button>
+      <button class="btn" @click="sweep()" :disabled="busy">🧹 Sweep Stale Tasks</button>
+      <button class="btn" @click="requeue()" :disabled="busy">🔁 Requeue Failed</button>
+      <button class="btn btn-danger" @click="reloadWorker()" :disabled="busy">⟳ Reload Worker</button>
+    </div>
+  </section>
+
+  <!-- ============ ACCOUNTS ============ -->
+  <section x-show="tab==='accounts'">
+    <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+      <template x-for="a in accounts" :key="a.id">
+        <div class="card p-5">
+          <div class="flex items-center justify-between">
+            <div class="font-bold text-white" x-text="a.phone"></div>
+            <span class="badge" :class="a.status==='ACTIVE' ? 'badge-ok' : (a.status==='RESTRICTED' ? 'badge-bad':'badge-warn')" x-text="a.status"></span>
+          </div>
+          <div class="text-xs text-slate-400 mt-1">
+            <span x-text="'@' + a.username"></span> · <span x-text="'id ' + a.id"></span>
+          </div>
+          <div class="mt-3 grid grid-cols-2 gap-2 text-xs">
+            <div class="bg-black/20 rounded-lg px-2.5 py-1.5">
+              <span class="text-slate-500">failures</span>
+              <div class="font-semibold" :class="a.failure_count > 0 ? 'text-amber-300' : 'text-slate-200'" x-text="a.failure_count"></div>
+            </div>
+            <div class="bg-black/20 rounded-lg px-2.5 py-1.5">
+              <span class="text-slate-500">proxy</span>
+              <div class="font-semibold" x-text="a.proxy?.enabled ? (a.proxy.type + '://' + a.proxy.host + ':' + a.proxy.port) : 'direct'"></div>
+            </div>
+          </div>
+          <div class="flex items-center justify-between mt-4">
+            <span class="badge badge-idle" x-show="!a.checking">session idle</span>
+            <span class="badge badge-warn spin-slow" x-show="a.checking">checking…</span>
+            <button class="btn btn-primary !py-1.5" @click="healthcheck(a)" :disabled="a.checking">Run health check</button>
+          </div>
+          <div class="text-xs mt-3" :class="a.check_result?.ok ? 'text-emerald-300' : 'text-rose-300'" x-show="a.check_result"
+               x-text="a.check_result ? (a.check_result.ok ? '✓ connected via ' + (a.check_result.transport || 'transport') + ', authorized' : '✗ ' + (a.check_result.error || 'check failed')) : ''"></div>
+        </div>
+      </template>
+      <div x-show="!accounts.length" class="card p-8 text-slate-400 text-sm col-span-full">No accounts imported yet.</div>
+    </div>
+  </section>
+
+  <!-- ============ CHANNELS ============ -->
+  <section x-show="tab==='channels'">
+    <div class="card p-5 mb-4">
+      <div class="flex flex-wrap gap-2.5 items-end">
+        <div class="grow min-w-[220px]">
+          <label class="text-xs text-slate-400">Target (@username, t.me link or -100… id)</label>
+          <input class="input mt-1" x-model="newTarget" placeholder="-1003481813519">
+        </div>
+        <div class="grow min-w-[160px]">
+          <label class="text-xs text-slate-400">Tag (optional)</label>
+          <input class="input mt-1" x-model="newTag" placeholder="private · high-value">
+        </div>
+        <button class="btn btn-primary" @click="addChannel()" :disabled="!newTarget.trim()">+ Add target</button>
+      </div>
+    </div>
+    <div class="card overflow-x-auto">
+      <table class="w-full min-w-[640px]">
+        <thead><tr><th class="th">Target</th><th class="th">Tag</th><th class="th">Tasks</th><th class="th">State</th><th class="th text-right">Actions</th></tr></thead>
+        <tbody>
+          <template x-for="t in targets" :key="t.id">
+            <tr>
+              <td class="td font-mono text-xs" x-text="t.target"></td>
+              <td class="td text-slate-400" x-text="t.tag"></td>
+              <td class="td" x-text="t.total_tasks"></td>
+              <td class="td"><span class="badge" :class="t.enabled ? 'badge-ok':'badge-idle'" x-text="t.enabled ? 'ENABLED' : 'DISABLED'"></span></td>
+              <td class="td text-right whitespace-nowrap">
+                <button class="btn !py-1 !px-2 mr-1.5" @click="toggleChannel(t.id)" x-text="t.enabled ? 'Disable' : 'Enable'"></button>
+                <button class="btn btn-danger !py-1 !px-2" @click="deleteChannel(t.id)">Delete</button>
+              </td>
+            </tr>
+          </template>
+          <tr x-show="!targets.length"><td colspan="5" class="td text-slate-400">No targets yet — add one above.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============ STUDIO ============ -->
+  <section x-show="tab==='studio'" class="grid grid-cols-1 xl:grid-cols-5 gap-4">
+    <div class="card p-5 xl:col-span-2">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-semibold text-white">Templates</h3>
+        <span class="text-xs text-slate-400">active = used at seed time</span>
+      </div>
+      <div class="space-y-2 max-h-72 overflow-y-auto pr-1">
+        <template x-for="t in templates" :key="t.id">
+          <div class="flex items-center gap-2 bg-black/20 rounded-xl px-3 py-2">
+            <div class="grow min-w-0">
+              <div class="text-sm font-medium text-white truncate" x-text="t.name"></div>
+              <div class="text-[11px] text-slate-500 truncate font-mono" x-text="t.template"></div>
+            </div>
+            <span class="badge" :class="t.is_active ? 'badge-ok':'badge-idle'" x-text="t.is_active ? 'ACTIVE':'OFF'"></span>
+            <button class="btn !py-1 !px-2" @click="editTemplate(t)">Edit</button>
+            <button class="btn !py-1 !px-2" @click="activateTemplate(t.id)" x-show="!t.is_active">Activate</button>
+            <button class="btn btn-danger !py-1 !px-2" @click="deleteTemplate(t.id)">✕</button>
+          </div>
+        </template>
+      </div>
+      <div class="mt-4 space-y-2.5">
+        <input class="input" x-model="tplName" placeholder="Template name">
+        <textarea class="input font-mono text-xs" rows="4" x-model="tplBody"
+          placeholder="{سلام|درود} دوستان! جهت دریافت نرخ لحظه‌ای و پروکسی: {channel_link}"></textarea>
+        <div class="text-[11px] text-slate-500">Spintax: {a|b|c} · Variables: {channel_link}</div>
+        <div class="flex gap-2">
+          <button class="btn" @click="spinPreview()" :disabled="!tplBody.trim()">Spin Test</button>
+          <button class="btn btn-primary" @click="saveTemplate()" x-text="tplId ? 'Update' : 'Add'"></button>
+          <button class="btn" x-show="tplId" @click="resetStudio()">New</button>
+        </div>
+      </div>
+    </div>
+    <div class="xl:col-span-3 space-y-4">
+      <div class="card p-5">
+        <h3 class="font-semibold text-white mb-2">Live Preview</h3>
+        <div class="space-y-2">
+          <template x-for="(v,i) in preview" :key="i">
+            <div class="bg-black/30 border border-white/10 rounded-xl px-3.5 py-2.5 text-sm text-slate-200" x-text="v"></div>
+          </template>
+          <div x-show="!preview.length" class="text-slate-500 text-sm">Press “Spin Test” to render variations of the current editor content.</div>
+        </div>
+      </div>
+      <div class="card p-5">
+        <h3 class="font-semibold text-white mb-2">Instant Direct Test</h3>
+        <div class="flex flex-wrap gap-2.5 items-end">
+          <div class="grow min-w-[220px]">
+            <label class="text-xs text-slate-400">Test channel target</label>
+            <input class="input mt-1" x-model="testTarget" placeholder="-1003481813519">
+          </div>
+          <button class="btn btn-primary" @click="testSend()" :disabled="busy">Send test message</button>
+        </div>
+        <div class="mt-3 text-sm" x-show="testResult" :class="testResult?.ok ? 'text-emerald-300' : 'text-rose-300'"
+             x-text="testResult ? (testResult.ok ? '✓ delivered · message_id=' + testResult.message_id + (testResult.verified ? ' (read-back confirmed)' : ' (unverified)') : '✗ ' + testResult.error) : ''"></div>
+        <div class="mt-2 text-xs text-slate-400 font-mono" x-show="testResult?.text" x-text="testResult?.text"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ TASKS ============ -->
+  <section x-show="tab==='tasks'">
+    <div class="card p-4 mb-4 flex flex-wrap gap-2.5 items-center">
+      <select class="input !w-auto" x-model="fStatus" @change="loadTasks()">
+        <option value="">All statuses</option>
+        <option value="PENDING">PENDING</option><option value="RUNNING">RUNNING</option>
+        <option value="COMPLETED">COMPLETED</option><option value="FAILED">FAILED</option>
+        <option value="CANCELLED">CANCELLED</option>
+      </select>
+      <input class="input !w-auto grow min-w-[180px]" x-model="fTarget" @input.debounce.400ms="loadTasks()" placeholder="filter by target…">
+      <input class="input !w-auto" type="date" x-model="fSince" @change="loadTasks()">
+      <div class="ml-auto flex gap-2">
+        <button class="btn" @click="sweep()">🧹 Sweep</button>
+        <button class="btn" @click="requeue()">🔁 Requeue failed</button>
+        <button class="btn btn-primary" @click="seed(false)">⚡ Seed now</button>
+      </div>
+    </div>
+    <div class="card overflow-x-auto">
+      <table class="w-full min-w-[760px]">
+        <thead><tr><th class="th">#</th><th class="th">Target</th><th class="th">Status</th><th class="th">Retries</th><th class="th">Created</th><th class="th">Executed</th><th class="th text-right">Actions</th></tr></thead>
+        <tbody>
+          <template x-for="t in tasks" :key="t.id">
+            <tr class="hover:bg-white/5 cursor-pointer" @click="openTask(t.id)">
+              <td class="td font-mono text-xs" x-text="t.id"></td>
+              <td class="td font-mono text-xs" x-text="t.target"></td>
+              <td class="td"><span class="badge" :class="statusBadge(t.status)" x-text="t.status"></span></td>
+              <td class="td" :class="t.retry_count > 0 && 'text-amber-300'" x-text="t.retry_count"></td>
+              <td class="td text-xs text-slate-400" x-text="t.created"></td>
+              <td class="td text-xs text-slate-400" x-text="t.executed || '—'"></td>
+              <td class="td text-right whitespace-nowrap" @click.stop>
+                <button class="btn !py-1 !px-2 mr-1.5" @click="openTask(t.id)">Inspect</button>
+                <button class="btn btn-danger !py-1 !px-2" x-show="t.status==='PENDING'" @click="cancelTask(t.id)">Cancel</button>
+                <button class="btn btn-danger !py-1 !px-2" x-show="['COMPLETED','FAILED','CANCELLED'].includes(t.status)" @click="purgeTask(t.id)">Purge</button>
+              </td>
+            </tr>
+          </template>
+          <tr x-show="!tasks.length"><td colspan="7" class="td text-slate-400">No tasks match the filters.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- task modal -->
+    <div class="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm grid place-items-center p-4" x-show="detail" x-cloak @click.self="detail=null">
+      <div class="card w-full max-w-2xl max-h-[85vh] overflow-y-auto p-6" x-show="detail">
+        <template x-if="detail">
+          <div>
+            <div class="flex items-center justify-between mb-4">
+              <h3 class="text-lg font-bold text-white">Task #<span x-text="detail.id"></span></h3>
+              <span class="badge" :class="statusBadge(detail.status)" x-text="detail.status"></span>
+            </div>
+            <div class="grid grid-cols-2 gap-2.5 text-sm">
+              <div class="bg-black/20 rounded-xl px-3 py-2"><div class="text-xs text-slate-500">Target</div><div class="font-mono text-xs mt-0.5" x-text="detail.target"></div></div>
+              <div class="bg-black/20 rounded-xl px-3 py-2"><div class="text-xs text-slate-500">Action</div><div class="mt-0.5" x-text="detail.action_type"></div></div>
+              <div class="bg-black/20 rounded-xl px-3 py-2"><div class="text-xs text-slate-500">Created</div><div class="mt-0.5" x-text="detail.created"></div></div>
+              <div class="bg-black/20 rounded-xl px-3 py-2"><div class="text-xs text-slate-500">Executed</div><div class="mt-0.5" x-text="detail.executed || '—'"></div></div>
+              <div class="bg-black/20 rounded-xl px-3 py-2"><div class="text-xs text-slate-500">Retries</div><div class="mt-0.5" x-text="detail.retry_count"></div></div>
+              <div class="bg-black/20 rounded-xl px-3 py-2"><div class="text-xs text-slate-500">Updated</div><div class="mt-0.5" x-text="detail.updated"></div></div>
+            </div>
+            <div class="mt-3 bg-black/30 rounded-xl p-3">
+              <div class="text-xs text-slate-500 mb-1">Payload</div>
+              <pre class="text-xs text-slate-300 font-mono whitespace-pre-wrap" x-text="JSON.stringify(detail.payload, null, 2)"></pre>
+            </div>
+            <div class="mt-3 bg-rose-500/10 border border-rose-400/20 rounded-xl p-3" x-show="detail.error_message">
+              <div class="text-xs text-rose-300/70 mb-1">Last error</div>
+              <div class="text-sm text-rose-200 font-mono" x-text="detail.error_message"></div>
+            </div>
+            <div class="mt-4">
+              <div class="text-xs text-slate-500 mb-1.5">Related audit events</div>
+              <div class="space-y-1.5 max-h-52 overflow-y-auto pr-1">
+                <template x-for="(l,i) in detail.logs" :key="i">
+                  <div class="flex gap-2 text-xs items-baseline">
+                    <span class="text-slate-500 font-mono shrink-0" x-text="l.created"></span>
+                    <span class="badge !px-1.5 !py-0" :class="levelClass(l.event_type)" x-text="l.event_type"></span>
+                    <span class="text-slate-300" x-text="l.message"></span>
+                  </div>
+                </template>
+                <div x-show="!detail.logs.length" class="text-slate-500 text-xs">No related audit events.</div>
+              </div>
+            </div>
+            <div class="mt-5 text-right">
+              <button class="btn" @click="detail=null">Close</button>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ SETTINGS ============ -->
+  <section x-show="tab==='settings'" class="grid grid-cols-1 xl:grid-cols-3 gap-4">
+    <div class="card p-5 xl:col-span-2">
+      <h3 class="font-semibold text-white mb-1">Runtime Configuration</h3>
+      <p class="text-xs text-slate-400 mb-4">Stored in the database and applied by the worker within 60s — no file edits, no restarts needed (except worker reload below).</p>
+      <div class="space-y-3.5">
+        <template x-for="d in settings.defs || []" :key="d.key">
+          <div class="flex flex-wrap items-center gap-3">
+            <div class="grow min-w-[240px]">
+              <div class="text-sm font-medium text-white" x-text="d.label"></div>
+              <div class="text-[11px] text-slate-500" x-text="d.help"></div>
+            </div>
+            <input class="input !w-28 text-center font-mono" type="number" :min="d.min" :max="d.max"
+                   x-model.number="settings.values[d.key]">
+            <span class="badge badge-idle font-mono" x-text="d.key"></span>
+          </div>
+        </template>
+      </div>
+      <div class="mt-5 flex items-center gap-3">
+        <button class="btn btn-primary" @click="saveSettings()" :disabled="busy">Save configuration</button>
+        <span class="text-xs" :class="settingsSaved ? 'text-emerald-300' : 'text-slate-500'"
+              x-text="settingsSaved ? '✓ saved — worker picks it up within 60s' : 'values clamp to the shown ranges'"></span>
+      </div>
+    </div>
+    <div class="card p-5">
+      <h3 class="font-semibold text-white mb-2">Service Controls</h3>
+      <p class="text-xs text-slate-400 mb-4">Requests a graceful worker reload. The daemon finishes its current loop iteration, exits cleanly (compose restart policy brings it straight back), and re-reads all settings.</p>
+      <button class="btn btn-danger w-full" @click="reloadWorker()" :disabled="busy">⟳ Reload worker service</button>
+      <div class="mt-4 text-xs text-slate-500" x-show="reloadMsg" x-text="reloadMsg"></div>
+    </div>
+  </section>
+
+  <!-- ============ LOGS ============ -->
+  <section x-show="tab==='logs'">
+    <div class="card p-4 mb-3 flex flex-wrap gap-2 items-center">
+      <template x-for="lv in ['INFO','WARNING','ERROR','CRITICAL']" :key="lv">
+        <button class="btn !py-1.5" :class="logLevels.includes(lv) ? 'btn-primary' : ''" @click="toggleLevel(lv)" x-text="lv"></button>
+      </template>
+      <span class="text-xs text-slate-500 ml-2" x-text="logs.length + ' events · newest first'"></span>
+      <button class="btn !py-1.5 ml-auto" @click="loadLogs()">↻ Refresh</button>
+    </div>
+    <div class="card bg-black/50 p-4 font-mono text-xs leading-relaxed max-h-[65vh] overflow-y-auto" id="logstream">
+      <template x-for="(e,i) in visibleLogs()" :key="i">
+        <div class="flex gap-2.5 items-baseline py-0.5 border-b border-white/5">
+          <span class="text-slate-500 shrink-0" x-text="e.created"></span>
+          <span class="shrink-0 font-bold" :class="levelClass(e.level)" x-text="e.level"></span>
+          <span class="text-slate-400 shrink-0 hidden md:inline" x-text="'[' + e.event_type + ']'"></span>
+          <span class="text-slate-200 break-all" x-text="e.message"></span>
+        </div>
+      </template>
+    </div>
+  </section>
+</main>
+
+<!-- toast -->
+<div class="fixed bottom-5 right-5 z-50 space-y-2" x-show="toastMsg" x-cloak>
+  <div class="card px-4 py-2.5 text-sm flex items-center gap-2" :class="toastOk ? 'text-emerald-300' : 'text-rose-300'">
+    <span x-text="toastOk ? '✓' : '✗'"></span><span x-text="toastMsg"></span>
+  </div>
+</div>
+
+<script>
+function dash() {
+  return {
+    tab: 'overview', busy: false, auto: true, interval: 15, timer: null,
+    hp: {}, k: {}, accounts: [], targets: [], templates: [], tasks: [],
+    detail: null, logs: [], logLevels: ['INFO', 'WARNING', 'ERROR', 'CRITICAL'],
+    settings: { defs: [], values: {} }, settingsSaved: false, reloadMsg: '',
+    preview: [], tplId: null, tplName: '', tplBody: '',
+    newTarget: '', newTag: '', testTarget: '-1003481813519', testResult: null,
+    fStatus: '', fTarget: '', fSince: '', toastMsg: '', toastOk: true,
+
+    kpiLabels: {
+      total_sent: ['Total Sent', 'all-time sends'],
+      verified: ['Verified Delivered', 'read-back confirmed'],
+      pending: ['Pending Queue', 'awaiting dispatch'],
+      running: ['Active Running', 'in flight now'],
+      failed: ['Failed', 'in backoff or terminal'],
+      retry_rate: ['Retry Rate', 'graduates / completed'],
+      latency: ['Delivery Latency', 'avg PENDING → COMPLETED'],
+    },
+
+    kpiCards() {
+      const c = this.k.counts || {};
+      const grad = this.k.retry_graduates || 0;
+      const done = c.COMPLETED || 0;
+      return {
+        total_sent: [done, done ? '' : 'no sends yet'],
+        verified: [this.k.verified_delivered ?? '—', ''],
+        pending: [c.PENDING || 0, ''],
+        running: [c.RUNNING || 0, ''],
+        failed: [c.FAILED || 0, ''],
+        retry_rate: [done ? Math.round(100 * grad / done) + '%' : '—', grad + ' graduated'],
+        latency: [this.k.avg_delivery_seconds != null ? this.fmtDur(this.k.avg_delivery_seconds) : '—',
+                  (this.k.deliveries_measured || 0) + ' measured'],
+      }.map(([label, [value, sub]]) => ({ label, value, sub }));
+    },
+
+    async init() {
+      await this.refresh();
+      this.loadAccounts(); this.loadChannels(); this.loadTemplates();
+      this.loadTasks(); this.loadSettings(); this.loadLogs();
+      this.applyInterval();
+    },
+    applyInterval() {
+      clearInterval(this.timer);
+      if (this.auto) this.timer = setInterval(() => this.refresh(), this.interval * 1000);
+    },
+    toggleAuto() { this.auto = !this.auto; this.applyInterval(); },
+    async refresh() {
+      try {
+        const d = await (await fetch('/api/overview')).json();
+        this.k = d.kpis; this.hp = d.health;
+        if (this.tab === 'logs') this.loadLogs();
+        if (this.tab === 'tasks') this.loadTasks();
+      } catch (e) { this.hp = {}; }
+    },
+    switchTab(t) { this.tab = t; if (t === 'tasks') this.loadTasks(); if (t === 'logs') this.loadLogs(); if (t === 'accounts') this.loadAccounts(); if (t === 'channels') this.loadChannels(); if (t === 'studio') this.loadTemplates(); if (t === 'settings') this.loadSettings(); },
+
+    async api(path, opts = {}, quiet) {
+      const res = await fetch(path, { headers: opts.body ? {} : {}, ...opts });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { if (!quiet) this.toast(data.detail || res.statusText, false); throw new Error(data.detail || res.statusText); }
+      return data;
+    },
+    toast(m, ok = true) { this.toastMsg = m; this.toastOk = ok; setTimeout(() => this.toastMsg = '', 3200); },
+
+    fmtDur(s) { s = +s; return s >= 90 ? (s / 60).toFixed(1) + ' min' : Math.round(s) + ' s'; },
+    statusBadge(s) { return { COMPLETED: 'badge-ok', RUNNING: 'badge-warn', PENDING: 'badge-idle', FAILED: 'badge-bad', CANCELLED: 'badge-idle' }[s] || 'badge-idle'; },
+    levelClass(l) { return { INFO: 'text-emerald-400', WARNING: 'text-amber-400', ERROR: 'text-rose-400', CRITICAL: 'text-rose-500', TASK_REQUEUED: 'badge-warn', STALE_TASK_RECOVERED: 'badge-warn', DELIVERY_VERIFIED: 'badge-ok', WORKER_STARTED: 'badge-ok' }[l] || 'text-slate-300'; },
+
+    async loadAccounts() { this.accounts = (await this.api('/api/accounts', {}, 1)).accounts.map(a => ({ ...a, checking: false, check_result: null })); },
+    async healthcheck(a) { a.checking = true; try { a.check_result = await this.api(`/api/accounts/${a.id}/healthcheck`, { method: 'POST' }, 1); } catch (e) { a.check_result = { ok: false, error: e.message }; } a.checking = false; },
+
+    async loadChannels() { this.targets = (await this.api('/api/channels', {}, 1)).targets; },
+    async addChannel() { try { await this.api('/api/channels', { method: 'POST', body: new URLSearchParams({ target: this.newTarget, tag: this.newTag }) }); this.newTarget = ''; this.newTag = ''; this.toast('Target added'); this.loadChannels(); } catch (e) {} },
+    async toggleChannel(id) { await this.api(`/api/channels/${id}/toggle`, { method: 'POST' }); this.loadChannels(); },
+    async deleteChannel(id) { await this.api(`/api/channels/${id}`, { method: 'DELETE' }); this.toast('Target deleted'); this.loadChannels(); },
+
+    async loadTemplates() { this.templates = (await this.api('/api/studio/templates', {}, 1)).templates; },
+    editTemplate(t) { this.tplId = t.id; this.tplName = t.name; this.tplBody = t.template; },
+    resetStudio() { this.tplId = null; this.tplName = ''; this.tplBody = ''; this.preview = []; },
+    async spinPreview() { const d = await this.api('/api/studio/preview', { method: 'POST', body: new URLSearchParams({ template: this.tplBody }) }); this.preview = d.variants; },
+    async saveTemplate() {
+      try {
+        if (this.tplId) await this.api(`/api/studio/templates/${this.tplId}`, { method: 'POST', body: new URLSearchParams({ template: this.tplBody }) });
+        else await this.api('/api/studio/templates', { method: 'POST', body: new URLSearchParams({ name: this.tplName, template: this.tplBody }) });
+        this.toast('Template saved'); this.resetStudio(); this.loadTemplates();
+      } catch (e) {}
+    },
+    async activateTemplate(id) { await this.api(`/api/studio/templates/${id}/toggle`, { method: 'POST' }); this.loadTemplates(); this.toast('Active template switched'); },
+    async deleteTemplate(id) { await this.api(`/api/studio/templates/${id}`, { method: 'DELETE' }); this.loadTemplates(); },
+    async testSend() { this.busy = true; try { this.testResult = await this.api('/api/studio/test-send', { method: 'POST', body: new URLSearchParams({ target: this.testTarget, template: this.tplBody }) }); } catch (e) { this.testResult = { ok: false, error: e.message }; } this.busy = false; },
+
+    async loadTasks() {
+      const p = new URLSearchParams({ status: this.fStatus, target: this.fTarget, since: this.fSince });
+      this.tasks = (await this.api('/api/tasks?' + p, {}, 1)).tasks;
+    },
+    async openTask(id) { this.detail = await this.api(`/api/tasks/${id}`, {}, 1); },
+    async cancelTask(id) { await this.api(`/api/tasks/${id}/cancel`, { method: 'POST' }); this.toast('Task cancelled'); this.loadTasks(); },
+    async purgeTask(id) { await this.api(`/api/tasks/${id}`, { method: 'DELETE' }); this.toast('Task purged'); this.loadTasks(); },
+
+    async seed(force) { this.busy = true; try { const d = await this.api('/api/actions/seed' + (force ? '?force=true' : ''), { method: 'POST' }); this.toast(d.seeded.length ? `Seeded ${d.seeded.length} task(s)` : `Nothing to seed (${Object.keys(d.skipped).length} skipped)`); this.refresh(); if (this.tab === 'tasks') this.loadTasks(); } catch (e) {} this.busy = false; },
+    async sweep() { this.busy = true; try { const d = await this.api('/api/actions/sweep', { method: 'POST' }); this.toast(`Swept: ${d.recovered} recovered, ${d.failed} terminal`); this.refresh(); } catch (e) {} this.busy = false; },
+    async requeue() { this.busy = true; try { const d = await this.api('/api/actions/requeue', { method: 'POST' }); this.toast(`Requeued ${d.requeued} failed task(s)`); this.refresh(); } catch (e) {} this.busy = false; },
+    async reloadWorker() { this.busy = true; try { await this.api('/api/worker/reload', { method: 'POST' }); this.reloadMsg = 'Reload requested — the worker will exit gracefully within ~60s and compose will restart it.'; this.toast('Worker reload requested'); } catch (e) {} this.busy = false; },
+
+    async loadSettings() {
+      const d = await (await fetch('/api/settings')).json();
+      this.settings = d; this.settingsSaved = false;
+    },
+    async saveSettings() {
+      this.busy = true;
+      const body = new URLSearchParams();
+      for (const d of this.settings.defs) body.set(d.key, this.settings.values[d.key] ?? '');
+      try { const r = await this.api('/api/settings', { method: 'POST', body }); this.settingsSaved = true; this.toast('Settings saved'); }
+      catch (e) {} this.busy = false;
+    },
+
+    async loadLogs() { this.logs = (await this.api('/api/logs?limit=300', {}, 1)).entries; },
+    toggleLevel(lv) { this.logLevels.includes(lv) ? this.logLevels = this.logLevels.filter(x => x !== lv) : this.logLevels.push(lv); },
+    visibleLogs() { return this.logs.filter(e => this.logLevels.includes(e.level)); },
+  };
+}
+</script>
+</body>
+</html>

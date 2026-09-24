@@ -11,6 +11,11 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 
 from src.core.dispatcher import TaskDispatcher
 from src.core.seeder import seed_tasks
+from src.core.settings import (
+    apply_db_settings_to_env,
+    get_setting_int,
+    get_worker_restart_flag,
+)
 from src.database.connection import get_db_connection
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -18,14 +23,17 @@ logger = logging.getLogger("worker")
 
 class GrowthWorker:
     def __init__(self, failure_threshold: int = 5):
+        apply_db_settings_to_env()
         self.dispatcher = TaskDispatcher()
         self.is_running = True
         self.failure_threshold = failure_threshold
         self.consecutive_failures = 0
-        self.scheduler_interval = int(os.getenv("SCHEDULER_INTERVAL", "3600"))
+        self.scheduler_interval = get_setting_int("SCHEDULER_INTERVAL")
         self.last_seed_monotonic: float | None = None
-        self.sweep_interval = int(os.getenv("GROWTH_SWEEP_INTERVAL_SECONDS", "300"))
+        self.sweep_interval = get_setting_int("GROWTH_SWEEP_INTERVAL_SECONDS")
         self.last_sweep_monotonic: float | None = None
+        self.settings_refresh_interval = 60
+        self.last_settings_monotonic: float | None = None
 
     def record_log(self, level: str, event_type: str, message: str):
         query = """
@@ -69,20 +77,17 @@ class GrowthWorker:
         """
         try:
             counts = self.dispatcher.sweep_stale_tasks()
+            requeued = self.dispatcher.requeue_failed_tasks()
             self.last_sweep_monotonic = time.monotonic()
             if counts["recovered"] or counts["failed"]:
                 logger.info(
                     f"Sweeper recovered {counts['recovered']} orphaned task(s), "
                     f"marked {counts['failed']} FAILED."
                 )
-        except Exception as exc:
-            logger.error(f"Stale-task sweep failed (will retry next interval): {exc}")
-        try:
-            requeued = self.dispatcher.requeue_failed_tasks()
             if requeued:
                 logger.info(f"Requeue pass returned {requeued} failed task(s) to PENDING.")
         except Exception as exc:
-            logger.error(f"Failed-task requeue pass error: {exc}")
+            logger.error(f"Maintenance pass failed (will retry next interval): {exc}")
 
     def stop(self, signum=None, frame=None):
         logger.info("Shutdown signal received. Stopping worker gracefully...")
@@ -107,6 +112,17 @@ class GrowthWorker:
                     await asyncio.sleep(5)
 
                 now_monotonic = time.monotonic()
+                if (self.last_settings_monotonic is None
+                        or now_monotonic - self.last_settings_monotonic >= self.settings_refresh_interval):
+                    apply_db_settings_to_env()
+                    self.scheduler_interval = get_setting_int("SCHEDULER_INTERVAL")
+                    self.sweep_interval = get_setting_int("GROWTH_SWEEP_INTERVAL_SECONDS")
+                    self.last_settings_monotonic = now_monotonic
+                    if get_worker_restart_flag():
+                        logger.info("Dashboard requested worker reload — restarting gracefully.")
+                        self.record_log("INFO", "WORKER_RELOAD", "Reload requested from dashboard.")
+                        self.stop()
+                        break
                 if (self.last_sweep_monotonic is None
                         or now_monotonic - self.last_sweep_monotonic >= self.sweep_interval):
                     self._run_sweeper()

@@ -37,3 +37,29 @@ CREATE TABLE IF NOT EXISTS system_logs (
     context JSONB DEFAULT '{}'::jsonb,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Dashboard-editable runtime configuration (single-row-per-key store)
+CREATE TABLE IF NOT EXISTS system_settings (
+    key VARCHAR(100) PRIMARY KEY,
+    value VARCHAR(200) NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Target channels managed via the dashboard (replaces static .env list)
+CREATE TABLE IF NOT EXISTS target_channels (
+    id SERIAL PRIMARY KEY,
+    target VARCHAR(255) UNIQUE NOT NULL,
+    tag VARCHAR(100),
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Message templates managed via the Spintax Studio
+CREATE TABLE IF NOT EXISTS message_templates (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(100) UNIQUE NOT NULL,
+    template TEXT NOT NULL,
+    is_active BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
