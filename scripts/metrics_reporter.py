@@ -5,6 +5,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from src.core.metrics import collect_lifecycle_metrics, format_lifecycle_summary
 from src.database.connection import get_db_connection
 
 def generate_report():
@@ -53,6 +54,9 @@ def generate_report():
     print("\nOperational Flags:")
     print(f"  - FloodWait Count: {report.get('flood_wait_tasks', 0)}")
     print(f"  - Circuit Breaker Trips: {report.get('circuit_breaker_events', 0)}")
+
+    lifecycle = collect_lifecycle_metrics()
+    print("\n" + format_lifecycle_summary(lifecycle))
     print("========================================")
 
 if __name__ == "__main__":
