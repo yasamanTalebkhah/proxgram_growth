@@ -50,6 +50,9 @@ def dashboard_kpis() -> Dict[str, Any]:
                 "SELECT COUNT(*) FROM system_logs WHERE event_type = 'TASK_REQUEUED';"
             )
             m["requeue_events"] = cur.fetchone()[0]
+
+            cur.execute("SELECT COUNT(*) FROM accounts WHERE status = 'ACTIVE';")
+            m["active_accounts"] = cur.fetchone()[0]
     return m
 
 
@@ -170,6 +173,53 @@ def delete_target(target_id: int) -> None:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM target_channels WHERE id = %s;", (target_id,))
         conn.commit()
+
+
+def bulk_import_targets(raw_text: str, tag: Optional[str] = None) -> Dict[str, Any]:
+    """Bulk-import targets from pasted multi-line text ("Batch Add Targets").
+
+    Accepts one target per line — @usernames, https://t.me/... links or
+    numeric -100… ids — using the same parser as the task seeder for
+    consistent normalization. Deduplicates within the pasted batch AND
+    against target_channels.target (UNIQUE), inserts the rest with the
+    optional common tag.
+
+    Returns {"added": n, "skipped": n, "duplicates": [targets already
+    present in the table]}. Invalid lines are simply not targets after
+    parsing (parser drops empties); anything the seeder parser accepts is
+    considered valid — Telegram-level validation happens at task runtime.
+    """
+    from src.core.seeder import parse_targets
+
+    batch: List[str] = []
+    seen = set()
+    for candidate in parse_targets(raw_text or ""):
+        if candidate not in seen:
+            seen.add(candidate)
+            batch.append(candidate)
+    if not batch:
+        return {"added": 0, "skipped": 0, "duplicates": []}
+
+    added: List[str] = []
+    duplicates: List[str] = []
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT target FROM target_channels WHERE target = ANY(%s);",
+                (batch,),
+            )
+            existing = {row[0] for row in cur.fetchall()}
+            for target in batch:
+                if target in existing:
+                    duplicates.append(target)
+                    continue
+                cur.execute(
+                    "INSERT INTO target_channels (target, tag) VALUES (%s, %s);",
+                    (target, tag),
+                )
+                added.append(target)
+        conn.commit()
+    return {"added": len(added), "skipped": len(duplicates), "duplicates": duplicates}
 
 
 # ---------------------------------------------------------------- studio ----

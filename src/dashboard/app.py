@@ -16,7 +16,7 @@ from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
-from src.core.dispatcher import TaskDispatcher
+from src.core.dispatcher import NoDiscussionGroupError, TaskDispatcher
 from src.core.seeder import seed_tasks
 from src.core.settings import (
     SETTING_DEFS,
@@ -33,6 +33,7 @@ from src.core.health import (
 )
 from src.dashboard.services import (
     accounts_view,
+    bulk_import_targets,
     dashboard_kpis,
     delete_target,
     delete_template,
@@ -104,6 +105,22 @@ def api_add_channel(target: str = Form(...), tag: str = Form("")):
     except Exception as exc:
         raise HTTPException(409, f"Could not add target: {exc}")
     return JSONResponse({"ok": True})
+
+
+@app.post("/api/channels/bulk-import")
+def api_bulk_import(payload: dict):
+    """Batch Add Targets: paste multi-line targets, dedupe, insert with common tag.
+
+    Body JSON: {"targets": "raw pasted text", "tag": "optional tag"}.
+    """
+    raw = str((payload or {}).get("targets") or "")
+    tag = str((payload or {}).get("tag") or "").strip() or None
+    if not raw.strip():
+        raise HTTPException(400, "Paste at least one target")
+    try:
+        return JSONResponse(bulk_import_targets(raw, tag))
+    except Exception as exc:
+        raise HTTPException(500, f"Bulk import failed: {exc}")
 
 
 @app.post("/api/channels/{target_id}/toggle")
@@ -221,6 +238,16 @@ def api_action_sweep():
 @app.post("/api/actions/requeue")
 def api_action_requeue():
     return {"ok": True, "requeued": dispatcher.requeue_failed_tasks()}
+
+
+@app.post("/api/tasks/{task_id}/retry")
+def api_retry_task(task_id: int):
+    """Manually requeue a FAILED task immediately (no backoff wait)."""
+    if not dispatcher.retry_task(task_id):
+        raise HTTPException(
+            409, "Task not retryable (must be FAILED with retries remaining)"
+        )
+    return JSONResponse({"ok": True})
 
 
 @app.get("/api/settings")

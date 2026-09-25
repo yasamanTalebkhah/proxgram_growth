@@ -3,8 +3,9 @@ import json
 import asyncio
 import logging
 from typing import Optional, Dict, Any
-from telethon import TelegramClient
+from telethon import TelegramClient, utils
 from telethon.errors import FloodWaitError, UserBannedInChannelError, ChatWriteForbiddenError
+from telethon.tl.functions.messages import GetDiscussionMessageRequest
 from telethon.tl.types import PeerChannel, PeerChat
 from src.database.connection import get_db_connection
 from src.accounts.manager import AccountManager
@@ -12,6 +13,15 @@ from src.core.rate_limiter import AntiSpamLimiter
 from src.core.templates import SpintaxEngine
 
 logger = logging.getLogger(__name__)
+
+
+class NoDiscussionGroupError(Exception):
+    """Broadcast channel has no linked discussion group or comments are locked.
+
+    Terminal condition: no amount of retrying will create a discussion
+    thread, so these tasks are SKIPPED rather than requeued.
+    """
+
 
 class TaskDispatcher:
     def __init__(self, account_manager: Optional[AccountManager] = None, limiter: Optional[AntiSpamLimiter] = None):
@@ -59,6 +69,9 @@ class TaskDispatcher:
             logger.error(f"Error atomically claiming next task: {e}")
         return None
 
+    # Terminal statuses for the sweeper/requeue eligibility checks.
+    TERMINAL_STATUSES = ("COMPLETED", "FAILED", "CANCELLED", "SKIPPED")
+
     def update_task_status(self, task_id: int, status: str, error_message: Optional[str] = None):
         query = """
             UPDATE tasks
@@ -76,6 +89,70 @@ class TaskDispatcher:
                 conn.commit()
         except Exception as e:
             logger.error(f"Error updating task {task_id} status to {status}: {e}")
+
+    def skip_task(self, task_id: int, reason: str):
+        """Mark a task SKIPPED — terminal, no retry_count burn, no requeue.
+
+        Used when a task can never succeed on retry (e.g. a broadcast
+        channel without comments), unlike FAILED which the backoff
+        requeue engine periodically returns to PENDING.
+        """
+        query = """
+            UPDATE tasks
+            SET status = 'SKIPPED',
+                error_message = %s,
+                executed_at = NOW(),
+                updated_at = NOW()
+            WHERE id = %s;
+        """
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(query, (reason, task_id))
+                    cur.execute(
+                        "INSERT INTO system_logs (level, event_type, message, created_at) "
+                        "VALUES ('INFO', 'TASK_SKIPPED', %s, NOW());",
+                        (f"Task #{task_id} skipped: {reason}",),
+                    )
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Error skipping task {task_id}: {e}")
+
+    def retry_task(self, task_id: int, max_retries: Optional[int] = None) -> bool:
+        """Manually requeue a FAILED task as PENDING (dashboard retry button).
+
+        Unlike requeue_failed_tasks() there is no backoff wait — an operator
+        who inspects a failure and presses retry wants it to run now. The
+        attempt still respects GROWTH_MAX_RETRIES so a terminally-dead task
+        is not resurrected forever. Returns True when the task was requeued.
+        """
+        if max_retries is None:
+            max_retries = int(os.getenv("GROWTH_MAX_RETRIES", "3"))
+        query = """
+            UPDATE tasks
+            SET status = 'PENDING',
+                updated_at = NOW()
+            WHERE id = %s
+              AND status = 'FAILED'
+              AND retry_count < %s;
+        """
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(query, (task_id, max_retries))
+                    requeued = cur.rowcount > 0
+                    if requeued:
+                        cur.execute(
+                            "INSERT INTO system_logs (level, event_type, message, created_at) "
+                            "VALUES ('INFO', 'TASK_REQUEUED', %s, NOW());",
+                            (f"Task #{task_id} manually retried from dashboard "
+                             f"(retry_count preserved)",),
+                        )
+                    conn.commit()
+                    return requeued
+        except Exception as e:
+            logger.error(f"Error retrying task {task_id}: {e}")
+            return False
 
     def sweep_stale_tasks(self, timeout_minutes: Optional[int] = None, max_retries: Optional[int] = None) -> Dict[str, int]:
         """Recover tasks orphaned in RUNNING by a dead/interrupted worker.
@@ -249,20 +326,97 @@ class TaskDispatcher:
         entity = await self._resolve_entity(client, target)
 
         if action == "SEND_MESSAGE":
-            sent = await client.send_message(entity, message_text)
-            expected_id = getattr(sent, "id", None)
-            if expected_id is not None:
-                confirmed = await self._verify_delivery(client, entity, task, expected_id)
-                if confirmed is not None:
-                    self._record_delivery(task["id"], target, confirmed)
+            read_entity = entity
+            if self._is_broadcast_channel(entity):
+                sent_id, read_entity = await self._comment_in_discussion(
+                    client, entity, target, message_text, task
+                )
+            else:
+                sent = await client.send_message(entity, message_text)
+                sent_id = getattr(sent, "id", None)
         elif action == "COMMENT_REPLY":
             reply_to_id = payload.get("reply_to_msg_id")
-            await client.send_message(entity, message_text, reply_to=reply_to_id)
+            sent = await client.send_message(entity, message_text, reply_to=reply_to_id)
+            sent_id = getattr(sent, "id", None)
         else:
             raise ValueError(f"Unsupported action type: {action}")
 
+        if sent_id is not None:
+            # For discussion comments the reply lands in the discussion
+            # group, so read back there — not on the channel entity.
+            confirmed = await self._verify_delivery(client, read_entity, task, sent_id)
+            if confirmed is not None:
+                self._record_delivery(task["id"], target, confirmed)
+
         logger.info(f"Task {task['id']} executed successfully on {target}")
         return True
+
+    @staticmethod
+    def _is_broadcast_channel(entity) -> bool:
+        """True for broadcast Channel entities (posts-only, no typing/comments inline).
+
+        Small chats/groups (Chat), users and megagroups are not broadcast
+        channels; commenting on them goes through the normal send path.
+        """
+        return (
+            getattr(entity, "__class__", None).__name__ == "Channel"
+            and getattr(entity, "broadcast", False)
+        )
+
+    async def _comment_in_discussion(self, client: TelegramClient, channel_entity, target: str,
+                                     message_text: str, task: Dict[str, Any]) -> Optional[int]:
+        """Comment on the latest post of a broadcast channel via its discussion group.
+
+        Broadcast channels reject direct user sends (CHAT_WRITE_FORBIDDEN),
+        so growth comments must be posted as replies to the channel's most
+        recent post inside the linked discussion group. Telegram resolves
+        the "discussion thread" for us: GetDiscussionMessageRequest maps a
+        channel post to its discussion-group message, which we then reply
+        to. The thread origin (discussion_message.id) is used as reply_to
+        per Telegram's comment-thread convention.
+
+        Raises NoDiscussionGroupError when the channel has no linked
+        discussion group or comments are disabled — callers turn that into
+        a terminal SKIPPED rather than burning retries on a task that can
+        never succeed.
+
+        Returns (telegram message id of the posted comment — for read-back
+        verification — and the discussion-group entity), or (None, group)
+        when the id cannot be determined.
+        """
+        posts = await client.get_messages(channel_entity, limit=1)
+        post = posts[0] if posts else None
+        if post is None or getattr(post, "service", False):
+            raise NoDiscussionGroupError(f"Channel {target} has no posts to comment on")
+
+        discussion = await client(GetDiscussionMessageRequest(
+            peer=channel_entity,
+            msg_id=post.id,
+        ))
+        # Telegram answers with messages.DiscussionMessage; an empty/absent
+        # message list means the post has no comment thread to reply into.
+        discussion_message = (getattr(discussion, "messages", None) or [None])[0]
+        if discussion_message is None:
+            raise NoDiscussionGroupError(
+                f"Channel {target} post {post.id} has no linked discussion (comments disabled?)"
+            )
+
+        # The discussion entity is a megagroup Chat (discussion group); a
+        # bare int would be ambiguous, so build the proper peer from it.
+        discussion_entity = await client.get_entity(
+            utils.get_peer_id(getattr(discussion_message, "peer_id", None) or discussion.chats[0])
+        )
+
+        sent = await client.send_message(
+            discussion_entity,
+            message_text,
+            reply_to=discussion_message.id,
+        )
+        logger.info(
+            f"Task {task['id']}: commented on post {post.id} of {target} in discussion "
+            f"group (thread origin {discussion_message.id}, comment id {getattr(sent, 'id', '?')})"
+        )
+        return getattr(sent, "id", None), discussion_entity
 
     @staticmethod
     def _parse_numeric_target(target: str):
@@ -342,6 +496,14 @@ class TaskDispatcher:
             logger.warning(f"FloodWait encountered on task {task['id']}: {fwe.seconds}s. Requeuing task.")
             self.update_task_status(task["id"], "PENDING", error_message=f"FloodWait: {fwe.seconds}s")
             await client.disconnect()
+            return False
+        except NoDiscussionGroupError as nde:
+            logger.warning(f"Task {task['id']} cannot be commented ({task['target']}): {nde}")
+            self.skip_task(task["id"], str(nde))
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
             return False
         except (UserBannedInChannelError, ChatWriteForbiddenError) as pe:
             logger.error(f"Permission failure on task {task['id']} ({task['target']}): {pe}")

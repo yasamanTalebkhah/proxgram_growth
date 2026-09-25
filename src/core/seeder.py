@@ -9,7 +9,9 @@ Message content comes from the active row in `message_templates`
 
 Dedupe: targets with a PENDING or COMPLETED SEND_MESSAGE task created within
 the last GROWTH_SEED_DEDUPE_HOURS (default 24) are skipped, so boot-time
-seeding, periodic seeding and manual runs never flood the queue.
+seeding, periodic seeding and manual runs never flood the queue. SKIPPED
+tasks (e.g. broadcast channels without comments) are also terminal: they
+block reseeding for the window instead of retry-looping.
 """
 
 import json
@@ -31,7 +33,7 @@ DEDUPE_SQL = """
     SELECT 1 FROM tasks
     WHERE target = %s
       AND action_type = 'SEND_MESSAGE'
-      AND status IN ('PENDING', 'COMPLETED')
+      AND status IN ('PENDING', 'COMPLETED', 'SKIPPED')
       AND created_at > NOW() - %s
     LIMIT 1;
 """

@@ -56,6 +56,15 @@
           <option value="5">5s</option><option value="15">15s</option><option value="30">30s</option>
         </select>
       </div>
+      <!-- live connectivity indicators -->
+      <div class="hidden md:flex items-center gap-1.5 mr-1">
+        <template x-for="c in connChips()" :key="c.name">
+          <span class="badge !px-2 !py-0.5" :class="c.ok ? 'badge-ok' : 'badge-bad'" :title="c.name">
+            <span class="w-1.5 h-1.5 rounded-full" :class="c.ok ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'"></span>
+            <span x-text="c.name"></span>
+          </span>
+        </template>
+      </div>
       <span class="badge" :class="hp.worker?.running ? 'badge-ok' : 'badge-bad'">
         <span class="w-1.5 h-1.5 rounded-full" :class="hp.worker?.running ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'"></span>
         <span x-text="hp.worker?.running ? 'worker live' : 'worker down'"></span>
@@ -68,7 +77,7 @@
 
   <!-- ============ OVERVIEW ============ -->
   <section x-show="tab==='overview'">
-    <div class="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3">
+    <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-3">
       <template x-for="c in kpiCards()" :key="c.label">
         <div class="card p-4">
           <div class="text-[11px] uppercase tracking-wide text-slate-400" x-text="c.label"></div>
@@ -161,6 +170,29 @@
           <input class="input mt-1" x-model="newTag" placeholder="private · high-value">
         </div>
         <button class="btn btn-primary" @click="addChannel()" :disabled="!newTarget.trim()">+ Add target</button>
+        <button class="btn" @click="bulkOpen = true" :disabled="busy">📋 Batch Add Targets</button>
+      </div>
+    </div>
+
+    <!-- bulk import modal -->
+    <div class="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm grid place-items-center p-4" x-show="bulkOpen" x-cloak @click.self="bulkOpen=false">
+      <div class="card w-full max-w-xl p-6" x-show="bulkOpen">
+        <h3 class="text-lg font-bold text-white mb-1">Batch Add Targets</h3>
+        <p class="text-xs text-slate-400 mb-3">One target per line — <span class="font-mono">@channel</span>, <span class="font-mono">https://t.me/…</span> or <span class="font-mono">-100…</span> id. Duplicates already configured are skipped.</p>
+        <textarea class="input font-mono text-xs" rows="8" x-model="bulkText"
+          placeholder="https://t.me/channel_one&#10;@channel_two&#10;-1003481813519"></textarea>
+        <input class="input mt-2" x-model="bulkTag" placeholder="Common tag (optional) — e.g. crypto · high-volume">
+        <div class="mt-3 text-sm" x-show="bulkResult" :class="bulkResult?.added ? 'text-emerald-300' : 'text-amber-300'">
+          <span x-show="bulkResult">
+            ✓ <b x-text="bulkResult?.added"></b> added, <b x-text="bulkResult?.skipped"></b> skipped (duplicates)
+            <span class="block text-xs text-slate-400 mt-1 font-mono" x-show="bulkResult?.duplicates?.length"
+                  x-text="'dupes: ' + (bulkResult?.duplicates || []).join(', ')"></span>
+          </span>
+        </div>
+        <div class="mt-4 flex justify-end gap-2">
+          <button class="btn" @click="bulkOpen=false">Close</button>
+          <button class="btn btn-primary" @click="bulkImport()" :disabled="!bulkText.trim() || busy">Import</button>
+        </div>
       </div>
     </div>
     <div class="card overflow-x-auto">
@@ -208,7 +240,7 @@
       </div>
       <div class="mt-4 space-y-2.5">
         <input class="input" x-model="tplName" placeholder="Template name">
-        <textarea class="input font-mono text-xs" rows="4" x-model="tplBody"
+        <textarea class="input font-mono text-xs" rows="4" x-model="tplBody" @input.debounce.500ms="tplBody.trim() && spinPreview()"
           placeholder="{سلام|درود} دوستان! جهت دریافت نرخ لحظه‌ای و پروکسی: {channel_link}"></textarea>
         <div class="text-[11px] text-slate-500">Spintax: {a|b|c} · Variables: {channel_link}</div>
         <div class="flex gap-2">
@@ -225,7 +257,7 @@
           <template x-for="(v,i) in preview" :key="i">
             <div class="bg-black/30 border border-white/10 rounded-xl px-3.5 py-2.5 text-sm text-slate-200" x-text="v"></div>
           </template>
-          <div x-show="!preview.length" class="text-slate-500 text-sm">Press “Spin Test” to render variations of the current editor content.</div>
+          <div x-show="!preview.length" class="text-slate-500 text-sm">Start typing spintax ({a|b|c}) — live variations render here automatically.</div>
         </div>
       </div>
       <div class="card p-5">
@@ -251,7 +283,7 @@
         <option value="">All statuses</option>
         <option value="PENDING">PENDING</option><option value="RUNNING">RUNNING</option>
         <option value="COMPLETED">COMPLETED</option><option value="FAILED">FAILED</option>
-        <option value="CANCELLED">CANCELLED</option>
+        <option value="SKIPPED">SKIPPED</option><option value="CANCELLED">CANCELLED</option>
       </select>
       <input class="input !w-auto grow min-w-[180px]" x-model="fTarget" @input.debounce.400ms="loadTasks()" placeholder="filter by target…">
       <input class="input !w-auto" type="date" x-model="fSince" @change="loadTasks()">
@@ -262,25 +294,31 @@
       </div>
     </div>
     <div class="card overflow-x-auto">
-      <table class="w-full min-w-[760px]">
-        <thead><tr><th class="th">#</th><th class="th">Target</th><th class="th">Status</th><th class="th">Retries</th><th class="th">Created</th><th class="th">Executed</th><th class="th text-right">Actions</th></tr></thead>
+      <table class="w-full min-w-[860px]">
+        <thead><tr><th class="th">#</th><th class="th">Target</th><th class="th">Status</th><th class="th">Error</th><th class="th">Retries</th><th class="th">Created</th><th class="th">Executed</th><th class="th text-right">Actions</th></tr></thead>
         <tbody>
           <template x-for="t in tasks" :key="t.id">
             <tr class="hover:bg-white/5 cursor-pointer" @click="openTask(t.id)">
               <td class="td font-mono text-xs" x-text="t.id"></td>
               <td class="td font-mono text-xs" x-text="t.target"></td>
               <td class="td"><span class="badge" :class="statusBadge(t.status)" x-text="t.status"></span></td>
+              <td class="td max-w-[220px]">
+                <span class="block text-xs font-mono truncate" :class="t.error_message ? 'text-rose-300' : 'text-slate-500'"
+                      :title="t.error_message || ''" @click.stop="t.error_message && showError(t)"
+                      x-text="t.error_message ? (t.error_message.length > 42 ? t.error_message.slice(0, 42) + '…' : t.error_message) : '—'"></span>
+              </td>
               <td class="td" :class="t.retry_count > 0 && 'text-amber-300'" x-text="t.retry_count"></td>
               <td class="td text-xs text-slate-400" x-text="t.created"></td>
               <td class="td text-xs text-slate-400" x-text="t.executed || '—'"></td>
               <td class="td text-right whitespace-nowrap" @click.stop>
                 <button class="btn !py-1 !px-2 mr-1.5" @click="openTask(t.id)">Inspect</button>
-                <button class="btn btn-danger !py-1 !px-2" x-show="t.status==='PENDING'" @click="cancelTask(t.id)">Cancel</button>
-                <button class="btn btn-danger !py-1 !px-2" x-show="['COMPLETED','FAILED','CANCELLED'].includes(t.status)" @click="purgeTask(t.id)">Purge</button>
+                <button class="btn btn-primary !py-1 !px-2 mr-1.5" x-show="t.status==='FAILED'" @click="retryTask(t.id)">Retry</button>
+                <button class="btn btn-danger !py-1 !px-2 mr-1.5" x-show="t.status==='PENDING'" @click="cancelTask(t.id)">Cancel</button>
+                <button class="btn btn-danger !py-1 !px-2" x-show="['COMPLETED','FAILED','CANCELLED','SKIPPED'].includes(t.status)" @click="purgeTask(t.id)">Purge</button>
               </td>
             </tr>
           </template>
-          <tr x-show="!tasks.length"><td colspan="7" class="td text-slate-400">No tasks match the filters.</td></tr>
+          <tr x-show="!tasks.length"><td colspan="8" class="td text-slate-400">No tasks match the filters.</td></tr>
         </tbody>
       </table>
     </div>
@@ -330,6 +368,25 @@
         </template>
       </div>
     </div>
+
+    <!-- error expand modal -->
+    <div class="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm grid place-items-center p-4" x-show="errorModal" x-cloak @click.self="errorModal=null">
+      <div class="card w-full max-w-2xl p-6" x-show="errorModal">
+        <template x-if="errorModal">
+          <div>
+            <div class="flex items-center justify-between mb-3">
+              <h3 class="text-lg font-bold text-white">Task #<span x-text="errorModal.id"></span> — error</h3>
+              <button class="btn !py-1 !px-2" @click="errorModal=null">✕</button>
+            </div>
+            <pre class="bg-black/40 border border-rose-400/20 rounded-xl p-4 text-xs text-rose-200 font-mono whitespace-pre-wrap break-all" x-text="errorModal.error_message"></pre>
+            <div class="mt-4 text-right flex justify-end gap-2">
+              <button class="btn" x-show="errorModal.status==='FAILED'" @click="retryTask(errorModal.id); errorModal=null">Retry now</button>
+              <button class="btn" @click="errorModal=null">Close</button>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
   </section>
 
   <!-- ============ SETTINGS ============ -->
@@ -370,11 +427,17 @@
       <template x-for="lv in ['INFO','WARNING','ERROR','CRITICAL']" :key="lv">
         <button class="btn !py-1.5" :class="logLevels.includes(lv) ? 'btn-primary' : ''" @click="toggleLevel(lv)" x-text="lv"></button>
       </template>
-      <span class="text-xs text-slate-500 ml-2" x-text="logs.length + ' events · newest first'"></span>
+      <input class="input !w-auto grow min-w-[160px]" x-model="logSearch" @input.debounce.300ms="logSearch = logSearch"
+             placeholder="filter messages…">
+      <label class="flex items-center gap-1.5 text-xs text-slate-300 ml-2 cursor-pointer select-none">
+        <input type="checkbox" class="accent-emerald-400" x-model="autoScroll"> auto-scroll
+      </label>
+      <span class="text-xs text-slate-500" x-text="visibleLogs().length + '/' + logs.length + ' events · newest first'"></span>
       <button class="btn !py-1.5 ml-auto" @click="loadLogs()">↻ Refresh</button>
     </div>
-    <div class="card bg-black/50 p-4 font-mono text-xs leading-relaxed max-h-[65vh] overflow-y-auto" id="logstream">
-      <template x-for="(e,i) in visibleLogs()" :key="i">
+    <div class="card bg-black/50 p-4 font-mono text-xs leading-relaxed max-h-[65vh] overflow-y-auto" id="logstream"
+         x-effect="if (autoScroll && tab==='logs') scrollLogsToBottom()">
+      <template x-for="(e,i) in visibleLogs().slice().reverse()" :key="i">
         <div class="flex gap-2.5 items-baseline py-0.5 border-b border-white/5">
           <span class="text-slate-500 shrink-0" x-text="e.created"></span>
           <span class="shrink-0 font-bold" :class="levelClass(e.level)" x-text="e.level"></span>
@@ -399,35 +462,36 @@ function dash() {
     tab: 'overview', busy: false, auto: true, interval: 15, timer: null,
     hp: {}, k: {}, accounts: [], targets: [], templates: [], tasks: [],
     detail: null, logs: [], logLevels: ['INFO', 'WARNING', 'ERROR', 'CRITICAL'],
+    autoScroll: true, logSearch: '',
     settings: { defs: [], values: {} }, settingsSaved: false, reloadMsg: '',
     preview: [], tplId: null, tplName: '', tplBody: '',
     newTarget: '', newTag: '', testTarget: '-1003481813519', testResult: null,
+    bulkOpen: false, bulkText: '', bulkTag: '', bulkResult: null,
+    errorModal: null,
     fStatus: '', fTarget: '', fSince: '', toastMsg: '', toastOk: true,
 
-    kpiLabels: {
-      total_sent: ['Total Sent', 'all-time sends'],
-      verified: ['Verified Delivered', 'read-back confirmed'],
-      pending: ['Pending Queue', 'awaiting dispatch'],
-      running: ['Active Running', 'in flight now'],
-      failed: ['Failed', 'in backoff or terminal'],
-      retry_rate: ['Retry Rate', 'graduates / completed'],
-      latency: ['Delivery Latency', 'avg PENDING → COMPLETED'],
+    connChips() {
+      return [
+        { name: 'pg', ok: !!this.hp.postgres },
+        { name: 'redis', ok: !!this.hp.redis },
+        { name: 'worker', ok: !!(this.hp.worker && this.hp.worker.running) },
+        { name: 'socks', ok: !!this.hp.socks },
+      ];
     },
 
     kpiCards() {
       const c = this.k.counts || {};
-      const grad = this.k.retry_graduates || 0;
       const done = c.COMPLETED || 0;
-      return {
-        total_sent: [done, done ? '' : 'no sends yet'],
-        verified: [this.k.verified_delivered ?? '—', ''],
-        pending: [c.PENDING || 0, ''],
-        running: [c.RUNNING || 0, ''],
-        failed: [c.FAILED || 0, ''],
-        retry_rate: [done ? Math.round(100 * grad / done) + '%' : '—', grad + ' graduated'],
-        latency: [this.k.avg_delivery_seconds != null ? this.fmtDur(this.k.avg_delivery_seconds) : '—',
-                  (this.k.deliveries_measured || 0) + ' measured'],
-      }.map(([label, [value, sub]]) => ({ label, value, sub }));
+      const failed = c.FAILED || 0;
+      const queue = (c.PENDING || 0) + (c.RUNNING || 0);
+      return [
+        { label: 'Success Rate', value: this.k.success_rate != null ? this.k.success_rate + '%' : '—',
+          sub: done + ' sent / ' + failed + ' failed' },
+        { label: 'Total Sent', value: done, sub: (this.k.verified_delivered || 0) + ' read-back verified' },
+        { label: 'Active Accounts', value: this.k.active_accounts ?? '—', sub: 'sessions ready to send' },
+        { label: 'Queue Depth', value: queue, sub: (c.PENDING || 0) + ' pending · ' + (c.RUNNING || 0) + ' running' },
+        { label: 'Failed', value: failed, sub: 'in backoff or terminal' },
+      ];
     },
 
     async init() {
@@ -460,7 +524,9 @@ function dash() {
     toast(m, ok = true) { this.toastMsg = m; this.toastOk = ok; setTimeout(() => this.toastMsg = '', 3200); },
 
     fmtDur(s) { s = +s; return s >= 90 ? (s / 60).toFixed(1) + ' min' : Math.round(s) + ' s'; },
-    statusBadge(s) { return { COMPLETED: 'badge-ok', RUNNING: 'badge-warn', PENDING: 'badge-idle', FAILED: 'badge-bad', CANCELLED: 'badge-idle' }[s] || 'badge-idle'; },
+    statusBadge(s) { return { COMPLETED: 'badge-ok', RUNNING: 'badge-warn', PENDING: 'badge-warn', FAILED: 'badge-bad', SKIPPED: 'badge-idle', CANCELLED: 'badge-idle' }[s] || 'badge-idle'; },
+    showError(t) { this.errorModal = t; },
+    scrollLogsToBottom() { this.$nextTick(() => { const el = document.getElementById('logstream'); if (el) el.scrollTop = el.scrollHeight; }); },
     levelClass(l) { return { INFO: 'text-emerald-400', WARNING: 'text-amber-400', ERROR: 'text-rose-400', CRITICAL: 'text-rose-500', TASK_REQUEUED: 'badge-warn', STALE_TASK_RECOVERED: 'badge-warn', DELIVERY_VERIFIED: 'badge-ok', WORKER_STARTED: 'badge-ok' }[l] || 'text-slate-300'; },
 
     async loadAccounts() { this.accounts = (await this.api('/api/accounts', {}, 1)).accounts.map(a => ({ ...a, checking: false, check_result: null })); },
@@ -470,9 +536,20 @@ function dash() {
     async addChannel() { try { await this.api('/api/channels', { method: 'POST', body: new URLSearchParams({ target: this.newTarget, tag: this.newTag }) }); this.newTarget = ''; this.newTag = ''; this.toast('Target added'); this.loadChannels(); } catch (e) {} },
     async toggleChannel(id) { await this.api(`/api/channels/${id}/toggle`, { method: 'POST' }); this.loadChannels(); },
     async deleteChannel(id) { await this.api(`/api/channels/${id}`, { method: 'DELETE' }); this.toast('Target deleted'); this.loadChannels(); },
+    async bulkImport() {
+      this.busy = true;
+      try {
+        this.bulkResult = await this.api('/api/channels/bulk-import', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ targets: this.bulkText, tag: this.bulkTag }),
+        });
+        this.toast(`Imported ${this.bulkResult.added} target(s), skipped ${this.bulkResult.skipped}`);
+        this.loadChannels(); this.refresh();
+      } catch (e) {} this.busy = false;
+    },
 
     async loadTemplates() { this.templates = (await this.api('/api/studio/templates', {}, 1)).templates; },
-    editTemplate(t) { this.tplId = t.id; this.tplName = t.name; this.tplBody = t.template; },
+    editTemplate(t) { this.tplId = t.id; this.tplName = t.name; this.tplBody = t.template; this.spinPreview(); },
     resetStudio() { this.tplId = null; this.tplName = ''; this.tplBody = ''; this.preview = []; },
     async spinPreview() { const d = await this.api('/api/studio/preview', { method: 'POST', body: new URLSearchParams({ template: this.tplBody }) }); this.preview = d.variants; },
     async saveTemplate() {
@@ -493,6 +570,7 @@ function dash() {
     async openTask(id) { this.detail = await this.api(`/api/tasks/${id}`, {}, 1); },
     async cancelTask(id) { await this.api(`/api/tasks/${id}/cancel`, { method: 'POST' }); this.toast('Task cancelled'); this.loadTasks(); },
     async purgeTask(id) { await this.api(`/api/tasks/${id}`, { method: 'DELETE' }); this.toast('Task purged'); this.loadTasks(); },
+    async retryTask(id) { await this.api(`/api/tasks/${id}/retry`, { method: 'POST' }); this.toast(`Task #${id} requeued`); this.loadTasks(); this.refresh(); },
 
     async seed(force) { this.busy = true; try { const d = await this.api('/api/actions/seed' + (force ? '?force=true' : ''), { method: 'POST' }); this.toast(d.seeded.length ? `Seeded ${d.seeded.length} task(s)` : `Nothing to seed (${Object.keys(d.skipped).length} skipped)`); this.refresh(); if (this.tab === 'tasks') this.loadTasks(); } catch (e) {} this.busy = false; },
     async sweep() { this.busy = true; try { const d = await this.api('/api/actions/sweep', { method: 'POST' }); this.toast(`Swept: ${d.recovered} recovered, ${d.failed} terminal`); this.refresh(); } catch (e) {} this.busy = false; },
@@ -511,9 +589,13 @@ function dash() {
       catch (e) {} this.busy = false;
     },
 
-    async loadLogs() { this.logs = (await this.api('/api/logs?limit=300', {}, 1)).entries; },
+    async loadLogs() { this.logs = (await this.api('/api/logs?limit=300', {}, 1)).entries; if (this.autoScroll && this.tab === 'logs') this.scrollLogsToBottom(); },
     toggleLevel(lv) { this.logLevels.includes(lv) ? this.logLevels = this.logLevels.filter(x => x !== lv) : this.logLevels.push(lv); },
-    visibleLogs() { return this.logs.filter(e => this.logLevels.includes(e.level)); },
+    visibleLogs() {
+      const q = (this.logSearch || '').toLowerCase();
+      return this.logs.filter(e => this.logLevels.includes(e.level) &&
+        (!q || (e.message || '').toLowerCase().includes(q) || (e.event_type || '').toLowerCase().includes(q)));
+    },
   };
 }
 </script>
