@@ -4,7 +4,12 @@ import asyncio
 import logging
 from typing import Optional, Dict, Any
 from telethon import TelegramClient, utils
-from telethon.errors import FloodWaitError, UserBannedInChannelError, ChatWriteForbiddenError
+from telethon.errors import (
+    ChatAdminRequiredError,
+    ChatWriteForbiddenError,
+    FloodWaitError,
+    UserBannedInChannelError,
+)
 from telethon.tl.functions.messages import GetDiscussionMessageRequest
 from telethon.tl.types import PeerChannel, PeerChat
 from src.database.connection import get_db_connection
@@ -90,30 +95,59 @@ class TaskDispatcher:
         except Exception as e:
             logger.error(f"Error updating task {task_id} status to {status}: {e}")
 
-    def skip_task(self, task_id: int, reason: str):
-        """Mark a task SKIPPED — terminal, no retry_count burn, no requeue.
+    def skip_task(self, task_id: int, reason: str, prune_target: Optional[str] = None):
+        """Mark a task SKIPPED and optionally hard-prune its target channel.
 
-        Used when a task can never succeed on retry (e.g. a broadcast
-        channel without comments), unlike FAILED which the backoff
-        requeue engine periodically returns to PENDING.
-        """
-        query = """
-            UPDATE tasks
-            SET status = 'SKIPPED',
-                error_message = %s,
-                executed_at = NOW(),
-                updated_at = NOW()
-            WHERE id = %s;
+        Terminal status: no retry_count burn, no requeue. When prune_target
+        is given, the target row is hard-DELETEd from target_channels in
+        the SAME transaction (task status + deletion + audit all commit
+        together or not at all), so no dangling, disabled or partial
+        record survives and the seeder can never reseed a channel that is
+        permanently un-commentable.
+
+        Auto-pruning fires ONLY for terminal comment-ineligibility
+        exceptions (no discussion group, private/approval-gated group,
+        write-forbidden/banned/admin-required) — never for transient
+        errors like FloodWait or connection failures, which requeue
+        instead of skipping.
         """
         try:
             with get_db_connection() as conn:
                 with conn.cursor() as cur:
-                    cur.execute(query, (reason, task_id))
+                    cur.execute(
+                        """
+                        UPDATE tasks
+                        SET status = 'SKIPPED',
+                            error_message = %s,
+                            executed_at = NOW(),
+                            updated_at = NOW()
+                        WHERE id = %s;
+                        """,
+                        (reason, task_id),
+                    )
                     cur.execute(
                         "INSERT INTO system_logs (level, event_type, message, created_at) "
                         "VALUES ('INFO', 'TASK_SKIPPED', %s, NOW());",
                         (f"Task #{task_id} skipped: {reason}",),
                     )
+                    if prune_target:
+                        cur.execute(
+                            "DELETE FROM target_channels WHERE target = %s;",
+                            (prune_target,),
+                        )
+                        removed = cur.rowcount
+                        cur.execute(
+                            "INSERT INTO system_logs (level, event_type, message, created_at) "
+                            "VALUES ('WARNING', 'TARGET_AUTO_DELETED', %s, NOW());",
+                            (f"Target '{prune_target}' auto-pruned from target_channels "
+                             f"after terminal comment failure on task #{task_id}: {reason} "
+                             f"(rows removed: {removed})",),
+                        )
+                        logger.warning(
+                            "Target '%s' pruned from target_channels "
+                            "(task %s terminal skip): %s",
+                            prune_target, task_id, reason,
+                        )
                 conn.commit()
         except Exception as e:
             logger.error(f"Error skipping task {task_id}: {e}")
@@ -596,16 +630,23 @@ class TaskDispatcher:
             await client.disconnect()
             return False
         except NoDiscussionGroupError as nde:
+            # Terminal comment-ineligibility: skip the task AND auto-prune
+            # the target so the seeder never requeues a dead channel.
             logger.warning(f"Task {task['id']} cannot be commented ({task['target']}): {nde}")
-            self.skip_task(task["id"], str(nde))
+            self.skip_task(task["id"], str(nde), prune_target=task["target"])
             try:
                 await client.disconnect()
             except Exception:
                 pass
             return False
-        except (UserBannedInChannelError, ChatWriteForbiddenError) as pe:
-            logger.error(f"Permission failure on task {task['id']} ({task['target']}): {pe}")
-            self.update_task_status(task["id"], "FAILED", error_message=str(pe))
+        except (UserBannedInChannelError, ChatWriteForbiddenError,
+                ChatAdminRequiredError) as pe:
+            # Raw permission failures (e.g. COMMENT_REPLY action or a send
+            # outside the discussion flow) are equally terminal for this
+            # target: the account cannot and will never be able to post.
+            reason = f"Permission failure: {pe}"
+            logger.error(f"Task {task['id']} permission failure ({task['target']}): {pe}")
+            self.skip_task(task["id"], reason, prune_target=task["target"])
             await client.disconnect()
             return False
         except Exception as e:

@@ -409,7 +409,8 @@ async def test_process_next_task_marks_skipped_on_no_discussion_error():
         result = await d.process_next_task()
 
     assert result is False
-    skip.assert_called_once_with(7, "comments locked")
+    # Terminal skip AND the target is auto-pruned from target_channels
+    skip.assert_called_once_with(7, "comments locked", prune_target="-1003481813519")
     status.assert_not_called()          # never marked FAILED
     upd.assert_not_called()             # account not penalized
     client.disconnect.assert_awaited_once()
