@@ -40,6 +40,8 @@ from src.dashboard.services import (
     insert_target,
     insert_template,
     latest_system_logs,
+    purge_all_tasks,
+    purge_targets,
     set_target_enabled,
     task_detail,
     task_page,
@@ -129,44 +131,111 @@ def api_toggle_channel(target_id: int):
     return JSONResponse({"ok": True})
 
 
+@app.patch("/api/channels/{target_id}/toggle")
+def api_toggle_channel_patch(target_id: int):
+    set_target_enabled(target_id)
+    return JSONResponse({"ok": True})
+
+
 @app.delete("/api/channels/{target_id}")
 def api_delete_channel(target_id: int):
     delete_target(target_id)
     return JSONResponse({"ok": True})
 
 
-@app.get("/api/studio/templates")
+@app.post("/api/channels/purge")
+def api_purge_channels():
+    """Clear ALL targets (dashboard "Clear All Targets")."""
+    cleared = purge_targets()
+    return JSONResponse({"ok": True, "cleared": cleared})
+
+
+@app.get("/api/templates")
 def api_templates():
+    """Canonical templates listing (aliases to the studio route)."""
     from src.dashboard.services import list_templates
 
     return {"templates": list_templates()}
 
 
-@app.post("/api/studio/templates")
-def api_add_template(name: str = Form(...), template: str = Form(...)):
+@app.get("/api/studio/templates")
+def api_studio_templates():
+    from src.dashboard.services import list_templates
+
+    return {"templates": list_templates()}
+
+
+@app.post("/api/templates")
+def api_add_template(
+    name: str = Form(...),
+    template: str = Form(...),
+    is_active: bool = Form(False),
+):
     if not name.strip() or not template.strip():
         raise HTTPException(400, "Name and template required")
     try:
-        insert_template(name.strip(), template)
+        insert_template(name.strip(), template, is_active=is_active)
     except Exception as exc:
         raise HTTPException(409, f"Could not add template: {exc}")
     return JSONResponse({"ok": True})
 
 
-@app.post("/api/studio/templates/{template_id}")
-def api_update_template(template_id: int, template: str = Form(...)):
-    update_template(template_id, template)
+@app.post("/api/studio/templates")
+def api_studio_add_template(
+    name: str = Form(...),
+    template: str = Form(...),
+    is_active: bool = Form(False),
+):
+    return api_add_template(name=name, template=template, is_active=is_active)
+
+
+@app.put("/api/templates/{template_id}")
+async def api_update_template_full(template_id: int, request: Request):
+    """Full update: name, template and/or is_active (exclusive activation)."""
+    form = dict(await request.form())
+    name = str(form.get("name") or "").strip() or None
+    template = str(form.get("template") or "").strip() or None
+    active_raw = form.get("is_active")
+    if name is None and template is None and active_raw is None:
+        raise HTTPException(400, "Nothing to update")
+    is_active = None if active_raw is None else str(active_raw).lower() in ("1", "true", "on", "yes")
+    try:
+        updated = update_template(template_id, template=template,
+                                  name=name, is_active=is_active)
+    except Exception as exc:
+        raise HTTPException(409, f"Could not update template: {exc}")
+    if not updated:
+        raise HTTPException(404, "Template not found")
     return JSONResponse({"ok": True})
 
 
-@app.post("/api/studio/templates/{template_id}/toggle")
+@app.post("/api/studio/templates/{template_id}")
+def api_studio_update_template(template_id: int, template: str = Form(...)):
+    if not update_template(template_id, template=template):
+        raise HTTPException(404, "Template not found")
+    return JSONResponse({"ok": True})
+
+
+@app.patch("/api/templates/{template_id}/toggle")
 def api_toggle_template(template_id: int):
     toggle_template(template_id)
     return JSONResponse({"ok": True})
 
 
-@app.delete("/api/studio/templates/{template_id}")
+@app.post("/api/studio/templates/{template_id}/toggle")
+def api_studio_toggle_template(template_id: int):
+    toggle_template(template_id)
+    return JSONResponse({"ok": True})
+
+
+@app.delete("/api/templates/{template_id}")
 def api_delete_template(template_id: int):
+    delete_template(template_id)
+    return JSONResponse({"ok": True})
+
+
+@app.delete("/api/studio/templates/{template_id}")
+def api_studio_delete_template(template_id: int):
     delete_template(template_id)
     return JSONResponse({"ok": True})
 
@@ -217,6 +286,24 @@ def api_purge_task(task_id: int):
     if not purge_task(task_id):
         raise HTTPException(409, "Only COMPLETED/FAILED/CANCELLED tasks can be purged")
     return JSONResponse({"ok": True})
+
+
+@app.post("/api/tasks/purge")
+def api_purge_tasks():
+    """Wipe the entire tasks table + Redis queue keys ("Clear All Tasks")."""
+    result = purge_all_tasks()
+    return JSONResponse({"ok": True, **result})
+
+
+@app.post("/api/tasks/seed")
+def api_seed_tasks(force: bool = False):
+    """Trigger task generation on demand (active targets + active template)."""
+    summary = seed_tasks(force=force)
+    return {
+        "ok": True,
+        "seeded": [{"task_id": t, "target": g} for g, t in summary["seeded"]],
+        "skipped": summary["skipped"],
+    }
 
 
 @app.post("/api/actions/seed")
@@ -312,7 +399,7 @@ def health():
 # Page routes LAST so the /{page} catch-all never shadows API or /health.
 @app.get("/{page}", response_class=HTMLResponse)
 def page(request: Request, page: str):
-    if page not in {"accounts", "channels", "studio", "tasks", "settings", "logs"}:
+    if page not in {"accounts", "channels", "templates", "studio", "tasks", "settings", "logs"}:
         raise HTTPException(404, "Not found")
     return templates.TemplateResponse(request, "index.html")
 

@@ -44,7 +44,7 @@
       </div>
     </div>
     <nav class="flex flex-wrap gap-1">
-      <template x-for="t in ['overview','accounts','channels','studio','tasks','settings','logs']" :key="t">
+      <template x-for="t in ['overview','accounts','channels','templates','studio','tasks','settings','logs']" :key="t">
         <button class="tabbtn" :class="tab===t && 'tabbtn-active'" @click="switchTab(t)" x-text="t[0].toUpperCase()+t.slice(1)"></button>
       </template>
     </nav>
@@ -171,6 +171,7 @@
         </div>
         <button class="btn btn-primary" @click="addChannel()" :disabled="!newTarget.trim()">+ Add target</button>
         <button class="btn" @click="bulkOpen = true" :disabled="busy">📋 Batch Add Targets</button>
+        <button class="btn btn-danger ml-auto" @click="askPurgeChannels()" :disabled="!targets.length">🗑 Clear all targets</button>
       </div>
     </div>
 
@@ -204,16 +205,99 @@
               <td class="td font-mono text-xs" x-text="t.target"></td>
               <td class="td text-slate-400" x-text="t.tag"></td>
               <td class="td" x-text="t.total_tasks"></td>
-              <td class="td"><span class="badge" :class="t.enabled ? 'badge-ok':'badge-idle'" x-text="t.enabled ? 'ENABLED' : 'DISABLED'"></span></td>
+              <td class="td">
+                <label class="inline-flex items-center cursor-pointer gap-2">
+                  <input type="checkbox" class="sr-only" :checked="t.enabled" @change="toggleChannel(t.id)">
+                  <span class="relative w-9 h-5 rounded-full transition-colors" :class="t.enabled ? 'bg-emerald-500/70' : 'bg-slate-600/50'">
+                    <span class="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform" :class="t.enabled && 'translate-x-4'"></span>
+                  </span>
+                  <span class="badge" :class="t.enabled ? 'badge-ok':'badge-idle'" x-text="t.enabled ? 'ENABLED' : 'DISABLED'"></span>
+                </label>
+              </td>
               <td class="td text-right whitespace-nowrap">
-                <button class="btn !py-1 !px-2 mr-1.5" @click="toggleChannel(t.id)" x-text="t.enabled ? 'Disable' : 'Enable'"></button>
-                <button class="btn btn-danger !py-1 !px-2" @click="deleteChannel(t.id)">Delete</button>
+                <button class="btn btn-danger !py-1 !px-2" @click="askDeleteChannel(t)">Delete</button>
               </td>
             </tr>
           </template>
           <tr x-show="!targets.length"><td colspan="5" class="td text-slate-400">No targets yet — add one above.</td></tr>
         </tbody>
       </table>
+    </div>
+  </section>
+
+  <!-- ============ TEMPLATES ============ -->
+  <section x-show="tab==='templates'">
+    <div class="card p-4 mb-4 flex flex-wrap gap-2.5 items-center">
+      <h3 class="font-semibold text-white grow">Message Templates</h3>
+      <span class="text-xs text-slate-400">active template is used at seed time</span>
+      <button class="btn btn-primary" @click="openTemplateModal()">+ New template</button>
+      <button class="btn btn-danger" @click="askPurgeTemplates()" :disabled="!templates.length">🗑 Delete all</button>
+    </div>
+    <div class="card overflow-x-auto">
+      <table class="w-full min-w-[760px]">
+        <thead><tr><th class="th">ID</th><th class="th">Name</th><th class="th">Template</th><th class="th">Status</th><th class="th">Created</th><th class="th text-right">Actions</th></tr></thead>
+        <tbody>
+          <template x-for="t in templates" :key="t.id">
+            <tr class="hover:bg-white/5">
+              <td class="td font-mono text-xs" x-text="t.id"></td>
+              <td class="td font-medium text-white" x-text="t.name"></td>
+              <td class="td max-w-[280px]">
+                <span class="block text-xs font-mono text-slate-300 truncate" :title="t.template" x-text="t.template"></span>
+              </td>
+              <td class="td">
+                <label class="inline-flex items-center cursor-pointer gap-2">
+                  <input type="checkbox" class="sr-only" :checked="t.is_active" @change="activateTemplate(t.id)">
+                  <span class="relative w-9 h-5 rounded-full transition-colors" :class="t.is_active ? 'bg-emerald-500/70' : 'bg-slate-600/50'">
+                    <span class="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform" :class="t.is_active && 'translate-x-4'"></span>
+                  </span>
+                  <span class="badge" :class="t.is_active ? 'badge-ok' : 'badge-idle'" x-text="t.is_active ? 'ACTIVE' : 'OFF'"></span>
+                </label>
+              </td>
+              <td class="td text-xs text-slate-400" x-text="t.created || '—'"></td>
+              <td class="td text-right whitespace-nowrap">
+                <button class="btn !py-1 !px-2 mr-1.5" @click="openTemplateModal(t)">Edit</button>
+                <button class="btn btn-danger !py-1 !px-2" @click="askDeleteTemplate(t)">Delete</button>
+              </td>
+            </tr>
+          </template>
+          <tr x-show="!templates.length"><td colspan="6" class="td text-slate-400">No templates yet — create one above.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- template add/edit modal -->
+    <div class="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm grid place-items-center p-4" x-show="tplModalOpen" x-cloak @click.self="tplModalOpen=false">
+      <div class="card w-full max-w-2xl p-6 max-h-[85vh] overflow-y-auto" x-show="tplModalOpen">
+        <h3 class="text-lg font-bold text-white mb-3" x-text="tplForm.id ? 'Edit template #' + tplForm.id : 'New template'"></h3>
+        <div class="space-y-3">
+          <div>
+            <label class="text-xs text-slate-400">Name</label>
+            <input class="input mt-1" x-model="tplForm.name" placeholder="Default Persian Promo">
+          </div>
+          <div>
+            <label class="text-xs text-slate-400">Template (spintax: {a|b|c} · variable: {channel_link})</label>
+            <textarea class="input font-mono text-xs mt-1" rows="4" x-model="tplForm.template" @input.debounce.500ms="tplForm.template.trim() && spinTplPreview()"
+              placeholder="{سلام|درود} دوستان! جهت دریافت نرخ لحظه‌ای و پروکسی: {channel_link}"></textarea>
+          </div>
+          <label class="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
+            <input type="checkbox" class="accent-emerald-400" x-model="tplForm.is_active"> Set as the active template (deactivates others)
+          </label>
+          <div>
+            <div class="text-xs text-slate-400 mb-1.5">Live spintax preview</div>
+            <div class="space-y-1.5">
+              <template x-for="(v,i) in tplPreview" :key="i">
+                <div class="bg-black/30 border border-white/10 rounded-xl px-3 py-2 text-sm text-slate-200" x-text="v"></div>
+              </template>
+              <div x-show="!tplPreview.length" class="text-slate-500 text-xs">Start typing — random variations render here live.</div>
+            </div>
+          </div>
+        </div>
+        <div class="mt-5 flex justify-end gap-2">
+          <button class="btn" @click="tplModalOpen=false">Cancel</button>
+          <button class="btn btn-primary" @click="saveTemplateForm()" :disabled="!tplForm.name.trim() || !tplForm.template.trim() || busy"
+                  x-text="tplForm.id ? 'Save changes' : 'Create template'"></button>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -288,9 +372,10 @@
       <input class="input !w-auto grow min-w-[180px]" x-model="fTarget" @input.debounce.400ms="loadTasks()" placeholder="filter by target…">
       <input class="input !w-auto" type="date" x-model="fSince" @change="loadTasks()">
       <div class="ml-auto flex gap-2">
+        <button class="btn btn-primary" @click="seed(false)">⚡ Trigger Seeder Now</button>
         <button class="btn" @click="sweep()">🧹 Sweep</button>
         <button class="btn" @click="requeue()">🔁 Requeue failed</button>
-        <button class="btn btn-primary" @click="seed(false)">⚡ Seed now</button>
+        <button class="btn btn-danger" @click="askPurgeTasks()" :disabled="!tasks.length">🗑 Clear All Tasks</button>
       </div>
     </div>
     <div class="card overflow-x-auto">
@@ -456,6 +541,23 @@
   </div>
 </div>
 
+<!-- generic confirm modal -->
+<div class="fixed inset-0 z-[60] bg-black/80 backdrop-blur-sm grid place-items-center p-4" x-show="confirmBox" x-cloak @click.self="confirmBox=null">
+  <div class="card w-full max-w-md p-6" x-show="confirmBox">
+    <template x-if="confirmBox">
+      <div>
+        <h3 class="text-lg font-bold text-white mb-1" x-text="confirmBox.title"></h3>
+        <p class="text-sm text-slate-300" x-text="confirmBox.message"></p>
+        <div class="mt-5 flex justify-end gap-2">
+          <button class="btn" @click="confirmBox=null">Cancel</button>
+          <button class="btn btn-danger" @click="(() => { const a = confirmBox; confirmBox = null; a.onConfirm(); })()"
+                  x-text="confirmBox.confirmLabel || 'Confirm'"></button>
+        </div>
+      </div>
+    </template>
+  </div>
+</div>
+
 <script>
 function dash() {
   return {
@@ -468,6 +570,8 @@ function dash() {
     newTarget: '', newTag: '', testTarget: '-1003481813519', testResult: null,
     bulkOpen: false, bulkText: '', bulkTag: '', bulkResult: null,
     errorModal: null,
+    confirmBox: null,
+    tplModalOpen: false, tplForm: { id: null, name: '', template: '', is_active: false }, tplPreview: [],
     fStatus: '', fTarget: '', fSince: '', toastMsg: '', toastOk: true,
 
     connChips() {
@@ -513,7 +617,7 @@ function dash() {
         if (this.tab === 'tasks') this.loadTasks();
       } catch (e) { this.hp = {}; }
     },
-    switchTab(t) { this.tab = t; if (t === 'tasks') this.loadTasks(); if (t === 'logs') this.loadLogs(); if (t === 'accounts') this.loadAccounts(); if (t === 'channels') this.loadChannels(); if (t === 'studio') this.loadTemplates(); if (t === 'settings') this.loadSettings(); },
+    switchTab(t) { this.tab = t; if (t === 'tasks') this.loadTasks(); if (t === 'logs') this.loadLogs(); if (t === 'accounts') this.loadAccounts(); if (t === 'channels') this.loadChannels(); if (t === 'templates' || t === 'studio') this.loadTemplates(); if (t === 'settings') this.loadSettings(); },
 
     async api(path, opts = {}, quiet) {
       const res = await fetch(path, { headers: opts.body ? {} : {}, ...opts });
@@ -534,8 +638,15 @@ function dash() {
 
     async loadChannels() { this.targets = (await this.api('/api/channels', {}, 1)).targets; },
     async addChannel() { try { await this.api('/api/channels', { method: 'POST', body: new URLSearchParams({ target: this.newTarget, tag: this.newTag }) }); this.newTarget = ''; this.newTag = ''; this.toast('Target added'); this.loadChannels(); } catch (e) {} },
-    async toggleChannel(id) { await this.api(`/api/channels/${id}/toggle`, { method: 'POST' }); this.loadChannels(); },
+    async toggleChannel(id) { await this.api(`/api/channels/${id}/toggle`, { method: 'PATCH' }); this.loadChannels(); },
     async deleteChannel(id) { await this.api(`/api/channels/${id}`, { method: 'DELETE' }); this.toast('Target deleted'); this.loadChannels(); },
+    askDeleteChannel(t) {
+      this.confirmBox = { title: 'Delete target?', message: `${t.target} and its row will be removed. Existing seeded tasks are kept.`, confirmLabel: 'Delete', onConfirm: () => this.deleteChannel(t.id) };
+    },
+    async purgeChannels() { const r = await this.api('/api/channels/purge', { method: 'POST' }); this.toast(`Cleared ${r.cleared} target(s)`); this.loadChannels(); this.refresh(); },
+    askPurgeChannels() {
+      this.confirmBox = { title: 'Clear ALL targets?', message: 'Every configured target channel will be removed. The seeder will have nothing to seed until you add targets again.', confirmLabel: 'Clear all', onConfirm: () => this.purgeChannels() };
+    },
     async bulkImport() {
       this.busy = true;
       try {
@@ -559,8 +670,45 @@ function dash() {
         this.toast('Template saved'); this.resetStudio(); this.loadTemplates();
       } catch (e) {}
     },
-    async activateTemplate(id) { await this.api(`/api/studio/templates/${id}/toggle`, { method: 'POST' }); this.loadTemplates(); this.toast('Active template switched'); },
-    async deleteTemplate(id) { await this.api(`/api/studio/templates/${id}`, { method: 'DELETE' }); this.loadTemplates(); },
+    async activateTemplate(id) { await this.api(`/api/templates/${id}/toggle`, { method: 'PATCH' }); this.loadTemplates(); this.toast('Active template switched'); },
+    async deleteTemplate(id) { await this.api(`/api/templates/${id}`, { method: 'DELETE' }); this.loadTemplates(); },
+    askDeleteTemplate(t) {
+      this.confirmBox = { title: 'Delete template?', message: `"${t.name}" will be permanently removed.`, confirmLabel: 'Delete', onConfirm: () => this.deleteTemplate(t.id) };
+    },
+    openTemplateModal(t = null) {
+      this.tplForm = t ? { id: t.id, name: t.name, template: t.template, is_active: t.is_active }
+                       : { id: null, name: '', template: '', is_active: false };
+      this.tplPreview = [];
+      this.tplModalOpen = true;
+    },
+    async spinTplPreview() {
+      if (!this.tplForm.template.trim()) { this.tplPreview = []; return; }
+      const d = await this.api('/api/studio/preview', { method: 'POST', body: new URLSearchParams({ template: this.tplForm.template }) });
+      this.tplPreview = d.variants;
+    },
+    async saveTemplateForm() {
+      this.busy = true;
+      try {
+        if (this.tplForm.id) {
+          await this.api(`/api/templates/${this.tplForm.id}`, {
+            method: 'PUT',
+            body: new URLSearchParams({ name: this.tplForm.name, template: this.tplForm.template, is_active: this.tplForm.is_active }),
+          });
+          this.toast('Template updated');
+        } else {
+          await this.api('/api/templates', {
+            method: 'POST',
+            body: new URLSearchParams({ name: this.tplForm.name, template: this.tplForm.template, is_active: this.tplForm.is_active }),
+          });
+          this.toast('Template created');
+        }
+        this.tplModalOpen = false; this.loadTemplates();
+      } catch (e) {} this.busy = false;
+    },
+    async purgeTemplates() { for (const t of [...this.templates]) await this.deleteTemplate(t.id); this.toast('All templates deleted'); this.loadTemplates(); },
+    askPurgeTemplates() {
+      this.confirmBox = { title: 'Delete ALL templates?', message: `${this.templates.length} template(s) will be permanently removed.`, confirmLabel: 'Delete all', onConfirm: () => this.purgeTemplates() };
+    },
     async testSend() { this.busy = true; try { this.testResult = await this.api('/api/studio/test-send', { method: 'POST', body: new URLSearchParams({ target: this.testTarget, template: this.tplBody }) }); } catch (e) { this.testResult = { ok: false, error: e.message }; } this.busy = false; },
 
     async loadTasks() {
@@ -570,6 +718,10 @@ function dash() {
     async openTask(id) { this.detail = await this.api(`/api/tasks/${id}`, {}, 1); },
     async cancelTask(id) { await this.api(`/api/tasks/${id}/cancel`, { method: 'POST' }); this.toast('Task cancelled'); this.loadTasks(); },
     async purgeTask(id) { await this.api(`/api/tasks/${id}`, { method: 'DELETE' }); this.toast('Task purged'); this.loadTasks(); },
+    async purgeTasks() { const r = await this.api('/api/tasks/purge', { method: 'POST' }); this.toast(`Cleared ${r.cleared} task(s), ${r.redis_keys} redis key(s)`); this.loadTasks(); this.refresh(); },
+    askPurgeTasks() {
+      this.confirmBox = { title: 'Clear ALL tasks?', message: 'The entire task queue is wiped and id numbering restarts. Delivered history and audit logs are kept, but running/pending work is lost.', confirmLabel: 'Clear all', onConfirm: () => this.purgeTasks() };
+    },
     async retryTask(id) { await this.api(`/api/tasks/${id}/retry`, { method: 'POST' }); this.toast(`Task #${id} requeued`); this.loadTasks(); this.refresh(); },
 
     async seed(force) { this.busy = true; try { const d = await this.api('/api/actions/seed' + (force ? '?force=true' : ''), { method: 'POST' }); this.toast(d.seeded.length ? `Seeded ${d.seeded.length} task(s)` : `Nothing to seed (${Object.keys(d.skipped).length} skipped)`); this.refresh(); if (this.tab === 'tasks') this.loadTasks(); } catch (e) {} this.busy = false; },

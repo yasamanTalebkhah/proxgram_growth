@@ -1,6 +1,7 @@
 """DB-backed view/query services for the dashboard (read paths + mutations)."""
 
 import json
+import logging
 import sys
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -8,6 +9,8 @@ from typing import Any, Dict, List, Optional
 sys.path.insert(0, __import__("os").path.abspath(__import__("os").path.join(__import__("os").path.dirname(__file__), "..", "..")))
 
 from src.database.connection import get_db_connection
+
+logger = logging.getLogger("dashboard.services")
 
 _SETTINGS_TABLE_READY = True
 
@@ -175,6 +178,26 @@ def delete_target(target_id: int) -> None:
         conn.commit()
 
 
+def purge_targets() -> int:
+    """Delete ALL target_channels rows (dashboard "Clear All Targets").
+
+    Returns the number of rows removed; writes a TARGETS_PURGED audit row.
+    """
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM target_channels;")
+            count = cur.fetchone()[0]
+            cur.execute("DELETE FROM target_channels;")
+            cur.execute(
+                "INSERT INTO system_logs (level, event_type, message, created_at) "
+                "VALUES ('WARNING', 'TARGETS_PURGED', %s, NOW());",
+                (f"All {count} target channel(s) removed via dashboard",),
+            )
+        conn.commit()
+    logger.warning("Purged %d target channel(s) via dashboard", count)
+    return count
+
+
 def bulk_import_targets(raw_text: str, tag: Optional[str] = None) -> Dict[str, Any]:
     """Bulk-import targets from pasted multi-line text ("Batch Add Targets").
 
@@ -230,36 +253,70 @@ def list_templates() -> List[Dict[str, Any]]:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, name, template, is_active, updated_at
+                SELECT id, name, template, is_active, created_at, updated_at
                 FROM message_templates ORDER BY is_active DESC, id;
                 """
             )
             for row in cur.fetchall():
                 templates.append({
                     "id": row[0], "name": row[1], "template": row[2],
-                    "is_active": row[3], "updated": _now_iso(row[4]),
+                    "is_active": row[3], "created": _now_iso(row[4]),
+                    "updated": _now_iso(row[5]),
                 })
     return templates
 
 
-def insert_template(name: str, template: str) -> None:
+def insert_template(name: str, template: str, is_active: bool = False) -> None:
+    """Create a template; exclusive activation is applied on request.
+
+    A UNIQUE(name) violation bubbles to the caller (409 conflict).
+    """
     with get_db_connection() as conn:
         with conn.cursor() as cur:
+            if is_active:
+                cur.execute("UPDATE message_templates SET is_active = FALSE;")
             cur.execute(
-                "INSERT INTO message_templates (name, template) VALUES (%s, %s);",
-                (name, template),
+                "INSERT INTO message_templates (name, template, is_active) "
+                "VALUES (%s, %s, %s);",
+                (name, template, is_active),
             )
         conn.commit()
 
 
-def update_template(template_id: int, template: str) -> None:
+def update_template(template_id: int, template: str = None,
+                    name: str = None, is_active: bool = None) -> bool:
+    """Partial update of an existing template. Returns False if missing.
+
+    Exclusive activation applies when is_active=True is requested: every
+    other template is deactivated first, so the seeder always has exactly
+    one active source.
+    """
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE message_templates SET template = %s, updated_at = NOW() WHERE id = %s;",
-                (template, template_id),
+                "SELECT id FROM message_templates WHERE id = %s;", (template_id,)
             )
+            if not cur.fetchone():
+                return False
+            if name is not None:
+                cur.execute(
+                    "UPDATE message_templates SET name = %s, updated_at = NOW() WHERE id = %s;",
+                    (name, template_id),
+                )
+            if template is not None:
+                cur.execute(
+                    "UPDATE message_templates SET template = %s, updated_at = NOW() WHERE id = %s;",
+                    (template, template_id),
+                )
+            if is_active is not None:
+                if is_active:
+                    cur.execute("UPDATE message_templates SET is_active = FALSE;")
+                cur.execute(
+                    "UPDATE message_templates SET is_active = %s, updated_at = NOW() WHERE id = %s;",
+                    (is_active, template_id),
+                )
         conn.commit()
+    return True
 
 
 def toggle_template(template_id: int) -> None:
@@ -288,6 +345,45 @@ def delete_template(template_id: int) -> None:
 
 
 # ---------------------------------------------------------------- tasks -----
+
+def purge_all_tasks() -> Dict[str, Any]:
+    """Wipe the ENTIRE tasks table (dashboard "Clear All Tasks").
+
+    TRUNCATE ... RESTART IDENTITY resets the serial sequence so new task
+    ids start from 1 again, and clears any task-queue scratch keys in
+    Redis (the queue itself is PostgreSQL-backed; Redis holds only
+    transient coordination keys such as task:<id> state hints).
+
+    Returns {"cleared": <row count>, "redis_keys": <keys removed>}.
+    A TASKS_PURGED audit row is written for the operations trail.
+    """
+    cleared = 0
+    redis_keys = 0
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM tasks;")
+            cleared = cur.fetchone()[0]
+            cur.execute("TRUNCATE tasks RESTART IDENTITY;")
+            cur.execute(
+                "INSERT INTO system_logs (level, event_type, message, created_at) "
+                "VALUES ('WARNING', 'TASKS_PURGED', %s, NOW());",
+                (f"All {cleared} task(s) purged via dashboard (identity reset)",),
+            )
+        conn.commit()
+
+    try:
+        from src.core.redis_client import get_redis_client
+
+        client = get_redis_client()
+        keys = list(client.scan_iter(match="task:*"))
+        if keys:
+            redis_keys = client.delete(*keys)
+    except Exception as exc:  # Redis is auxiliary — a purge must not fail
+        logger.warning("Redis task-key flush skipped: %s", exc)
+
+    logger.warning("Purged %d task(s), %d redis key(s)", cleared, redis_keys)
+    return {"cleared": cleared, "redis_keys": redis_keys}
+
 
 def task_page(status: str = "", target: str = "", since: str = "",
               limit: int = 100) -> List[Dict[str, Any]]:
