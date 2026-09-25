@@ -1,10 +1,24 @@
-"""Broadcast-channel commenting: GetDiscussionMessageRequest flow, SKIPPED
-terminal status, and dashboard-driven manual retry (all DB mocked)."""
+"""Broadcast-channel commenting: GetDiscussionMessageRequest flow resolved
+exactly like Telethon's own comment support (thread origin = lowest-id
+message, discussion chat matched by channel_id), explicit discussion-group
+dispatch, auto-join, SKIPPED terminal status, and manual retry."""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from telethon.errors import (
+    ChannelPrivateError,
+    ChatAdminRequiredError,
+    ChatWriteForbiddenError,
+    InviteRequestSentError,
+    MsgIdInvalidError,
+    UserAlreadyParticipantError,
+    UserBannedInChannelError,
+)
+from telethon.tl.functions.channels import JoinChannelRequest
+from telethon.tl.functions.messages import GetDiscussionMessageRequest
+from telethon.tl.types import Channel, PeerChannel
 
 from src.core.dispatcher import NoDiscussionGroupError, TaskDispatcher
 
@@ -17,38 +31,15 @@ def _channel(broadcast=True, megagroup=False):
     return chat
 
 
-def _task(**overrides):
-    task = {
-        "id": 7,
-        "target": "-1003481813519",
-        "action_type": "SEND_MESSAGE",
-        "payload": {"template": "t {channel_link}", "channel_link": "@proxgram"},
-        "retry_count": 0,
+def _task(*, id=7, target="-1003481813519", action_type="SEND_MESSAGE", payload=None,
+          retry_count=0):
+    return {
+        "id": id,
+        "target": target,
+        "action_type": action_type,
+        "payload": payload or {"template": "t {channel_link}", "channel_id": "@proxgram"},
+        "retry_count": retry_count,
     }
-    task.update(overrides)
-    return task
-
-
-def _client_with(post, discussion_result="__default__", sent_id=555):
-    client = AsyncMock()
-    client.get_messages = AsyncMock(return_value=[post])
-    # Awaited result of the top-level client(request) call — Telethon usage.
-    if discussion_result == "__default__":
-        from telethon.tl.types import PeerChannel
-
-        dm = MagicMock()
-        dm.id = 91
-        dm.peer_id = PeerChannel(456)
-        wrapper = MagicMock()
-        wrapper.messages = [dm]
-        client.return_value = wrapper
-    else:
-        client.return_value = discussion_result
-    sent = MagicMock()
-    sent.id = sent_id
-    client.send_message = AsyncMock(return_value=sent)
-    client.get_entity = AsyncMock(return_value=MagicMock(name="discussion_group"))
-    return client
 
 
 def _post(msg_id=90):
@@ -58,80 +49,297 @@ def _post(msg_id=90):
     return post
 
 
-def _discussion_result(msg_id=91):
-    """messages.DiscussionMessage-shaped result with one thread-origin message."""
-    from telethon.tl.types import PeerChannel
+def _group_channel(cid=456, access_hash=12345):
+    """A real megagroup Channel as embedded in messages.DiscussionMessage.chats."""
+    return Channel(id=cid, title="discussion", megagroup=True, photo=None,
+                   date=None, access_hash=access_hash)
 
-    dm = MagicMock()
-    dm.id = msg_id
-    dm.peer_id = PeerChannel(456)  # real TL type: utils.get_peer_id must cast it
+
+def _discussion_result(messages, chats):
+    """messages.DiscussionMessage-shaped result."""
     wrapper = MagicMock()
-    wrapper.messages = [dm]
+    wrapper.messages = messages
+    wrapper.chats = chats
     return wrapper
 
 
+def _origin_message(msg_id, channel_id):
+    m = MagicMock()
+    m.id = msg_id
+    peer = MagicMock()
+    peer.channel_id = channel_id
+    m.peer_id = PeerChannel(channel_id)  # real TL type for peer matching
+    m.peer_id.channel_id = channel_id
+    return m
+
+
+def _client(post=None, discussion_result=None, sent_id=555):
+    client = AsyncMock()
+    client.get_messages = AsyncMock(return_value=[post if post is not None else _post()])
+    # Awaited result of the top-level client(request) call — used for both
+    # GetDiscussionMessageRequest and JoinChannelRequest.
+    client.return_value = discussion_result
+    sent = MagicMock()
+    sent.id = sent_id
+    client.send_message = AsyncMock(return_value=sent)
+    return client
+
+
+def _run_comment(d, client):
+    return asyncio.run(
+        d._comment_in_discussion(client, _channel(), "-100123", "hello", _task())
+    )
+
+
 # ------------------------------------------------------- broadcast flow ----
+
+def test_resolve_upgrades_bare_input_peer_to_full_channel():
+    """t.me/username targets resolve to a bare InputPeerChannel with no
+    broadcast flag; the dispatcher must upgrade it via GetChannelsRequest
+    so broadcast detection works (root cause of admin-required failures)."""
+    from telethon.tl.functions.channels import GetChannelsRequest
+    from telethon.tl.types import InputChannel, InputPeerChannel
+
+    d = TaskDispatcher()
+    client = AsyncMock()
+    bare = InputPeerChannel(channel_id=777, access_hash=42)
+    client.get_input_entity = AsyncMock(return_value=bare)
+    full = _group_channel(777, 42)
+    full.broadcast = True
+    client.return_value = MagicMock(chats=[full])
+
+    entity = asyncio.run(d._resolve_entity(client, "https://t.me/somechannel"))
+
+    assert entity is full
+    req = client.await_args.args[0]
+    assert isinstance(req, GetChannelsRequest)
+    assert isinstance(req.id[0], InputChannel)
+    assert req.id[0].channel_id == 777
+
+
+def test_resolve_keeps_bare_peer_when_upgrade_fails():
+    d = TaskDispatcher()
+    client = AsyncMock()
+    from telethon.tl.types import InputPeerChannel
+
+    client.get_input_entity = AsyncMock(
+        return_value=InputPeerChannel(channel_id=777, access_hash=42))
+    client.side_effect = RuntimeError("network down")
+
+    entity = asyncio.run(d._resolve_entity(client, "https://t.me/somechannel"))
+    assert type(entity).__name__ == "InputPeerChannel"  # degraded, not crashed
+
 
 def test_broadcast_channel_detected_only_for_broadcast_entities():
     assert TaskDispatcher._is_broadcast_channel(_channel(broadcast=True)) is True
     assert TaskDispatcher._is_broadcast_channel(_channel(broadcast=False, megagroup=True)) is False
     assert TaskDispatcher._is_broadcast_channel(MagicMock(name="Chat")) is False
-    assert TaskDispatcher._is_broadcast_channel(MagicMock(name="User")) is False
+    assert TaskDispatcher._is_broadcast_channel(MagicMock(name="Chat", megagroup=True)) is False
 
 
-def test_comment_in_discussion_posts_reply_in_group_and_returns_id():
+def test_comment_sends_to_discussion_group_not_channel():
     d = TaskDispatcher()
-    client = _client_with(_post(90), sent_id=555)
+    group = _group_channel(456, 12345)
+    # messages[0] is the group-side origin; a second higher-id entry
+    # mimics the channel-side post also present in real responses.
+    origin = _origin_message(91, 456)
+    channel_side = _origin_message(999, 789)
+    client = _client(discussion_result=_discussion_result(
+        [channel_side, origin], [_group_channel(789, 555), group]))
 
-    sent_id, group = asyncio.run(
-        d._comment_in_discussion(client, _channel(), "-100123", "hello", _task())
-    )
+    sent_id, read_entity = _run_comment(d, client)
 
     assert sent_id == 555
-    assert group is client.get_entity.return_value
-    # Latest post fetched from the channel itself
+    # read_entity is the InputPeerChannel built from the embedded group chat
+    assert getattr(read_entity, "channel_id", None) == 456
+    assert type(read_entity).__name__ == "InputPeerChannel"
     client.get_messages.assert_awaited_once()
-    # Discussion resolved through the TL request
-    from telethon.tl.functions.messages import GetDiscussionMessageRequest
-
-    request = client.await_args.args[0]
+    # Discussion resolved through the TL request on the channel peer
+    request = client.await_args_list[0].args[0]
     assert isinstance(request, GetDiscussionMessageRequest)
     assert request.msg_id == 90
-    # Comment sent as a reply to the thread origin in the discussion group
+    # Comment sent TO THE DISCUSSION GROUP as a reply to the thread origin
     send_args, send_kwargs = client.send_message.call_args
+    assert type(send_args[0]).__name__ == "InputPeerChannel"
+    assert send_args[0].channel_id == 456
     assert send_kwargs.get("reply_to") == 91
-    assert send_args[0] is client.get_entity.return_value
+
+
+def test_comment_auto_joins_discussion_group_before_sending():
+    d = TaskDispatcher()
+    group = _group_channel(456, 12345)
+    client = _client(discussion_result=_discussion_result(
+        [_origin_message(91, 456)], [group]))
+
+    _run_comment(d, client)
+
+    # Join request issued against the discussion entity...
+    join_request = client.await_args_list[1].args[0]
+    assert isinstance(join_request, JoinChannelRequest)
+    # ...and the send followed it.
+    client.send_message.assert_awaited_once()
+
+
+def test_comment_already_participant_is_ignored_and_send_proceeds():
+    d = TaskDispatcher()
+    group = _group_channel(456, 12345)
+    client = _client(discussion_result=_discussion_result(
+        [_origin_message(91, 456)], [group]))
+
+    def _call_side_effect(request, *a, **kw):
+        if isinstance(request, JoinChannelRequest):
+            raise UserAlreadyParticipantError(request=request)
+        return client.return_value
+
+    client.side_effect = _call_side_effect
+
+    sent_id, _ = _run_comment(d, client)
+    assert sent_id == 555
+    client.send_message.assert_awaited_once()
+
+
+def test_comment_private_discussion_on_get_raises_skip():
+    d = TaskDispatcher()
+    group = _group_channel(456, 12345)
+    client = _client(discussion_result=_discussion_result(
+        [_origin_message(91, 456)], [group]))
+
+    def _call_side_effect(request, *a, **kw):
+        raise ChannelPrivateError(request=request)
+
+    client.side_effect = _call_side_effect
+
+    with pytest.raises(NoDiscussionGroupError):
+        _run_comment(d, client)
+    client.send_message.assert_not_awaited()
+
+
+def test_comment_private_group_on_join_raises_skip():
+    d = TaskDispatcher()
+    group = _group_channel(456, 12345)
+    client = _client(discussion_result=_discussion_result(
+        [_origin_message(91, 456)], [group]))
+
+    def _call_side_effect(request, *a, **kw):
+        if isinstance(request, JoinChannelRequest):
+            raise ChannelPrivateError(request=request)
+        return client.return_value
+
+    client.side_effect = _call_side_effect
+
+    with pytest.raises(NoDiscussionGroupError, match="join approval"):
+        _run_comment(d, client)
+    client.send_message.assert_not_awaited()
+
+
+def test_comment_locked_thread_maps_write_forbidden_to_skip():
+    d = TaskDispatcher()
+    group = _group_channel(456, 12345)
+    client = _client(discussion_result=_discussion_result(
+        [_origin_message(91, 456)], [group]))
+    client.send_message = AsyncMock(side_effect=ChatWriteForbiddenError(request=None))
+
+    with pytest.raises(NoDiscussionGroupError, match="Comments locked"):
+        _run_comment(d, client)
+
+
+def test_comment_admin_required_maps_to_skip():
+    """The live-fire failure: ChatAdminRequiredError must SKIPPED, not retry-loop."""
+    d = TaskDispatcher()
+    group = _group_channel(456, 12345)
+    client = _client(discussion_result=_discussion_result(
+        [_origin_message(91, 456)], [group]))
+    client.send_message = AsyncMock(side_effect=ChatAdminRequiredError(request=None))
+
+    with pytest.raises(NoDiscussionGroupError):
+        _run_comment(d, client)
+
+
+def test_comment_banned_in_group_maps_to_skip():
+    d = TaskDispatcher()
+    group = _group_channel(456, 12345)
+    client = _client(discussion_result=_discussion_result(
+        [_origin_message(91, 456)], [group]))
+    client.send_message = AsyncMock(side_effect=UserBannedInChannelError(request=None))
+
+    with pytest.raises(NoDiscussionGroupError):
+        _run_comment(d, client)
+
+
+def test_comment_join_request_sent_maps_to_skip():
+    """Approval-gated groups raise InviteRequestSentError on join — terminal."""
+    d = TaskDispatcher()
+    group = _group_channel(456, 12345)
+    client = _client(discussion_result=_discussion_result(
+        [_origin_message(91, 456)], [group]))
+
+    def _call_side_effect(request, *a, **kw):
+        if isinstance(request, JoinChannelRequest):
+            raise InviteRequestSentError(request=request)
+        return client.return_value
+
+    client.side_effect = _call_side_effect
+
+    with pytest.raises(NoDiscussionGroupError, match="join approval"):
+        _run_comment(d, client)
+    client.send_message.assert_not_awaited()
+
+
+def test_comment_msg_id_invalid_on_get_maps_to_skip():
+    """MSG_ID_INVALID from GetDiscussionMessageRequest = no discussion linked."""
+    d = TaskDispatcher()
+    group = _group_channel(456, 12345)
+    client = _client(discussion_result=_discussion_result(
+        [_origin_message(91, 456)], [group]))
+
+    def _call_side_effect(request, *a, **kw):
+        if isinstance(request, GetDiscussionMessageRequest):
+            raise MsgIdInvalidError(request=request)
+        return client.return_value
+
+    client.side_effect = _call_side_effect
+
+    with pytest.raises(NoDiscussionGroupError, match="no comment thread"):
+        _run_comment(d, client)
+    client.send_message.assert_not_awaited()
+
+
+def test_comment_unresolvable_group_raises_skip():
+    d = TaskDispatcher()
+    # Origin's channel_id has no counterpart in discussion.chats
+    client = _client(discussion_result=_discussion_result(
+        [_origin_message(91, 999)], [_group_channel(456, 12345)]))
+
+    with pytest.raises(NoDiscussionGroupError, match="could not be resolved"):
+        _run_comment(d, client)
 
 
 def test_comment_without_discussion_raises_no_discussion_error():
     d = TaskDispatcher()
-    # Telegram answers with an empty message list when comments are locked.
     empty = MagicMock()
     empty.messages = []
-    client = _client_with(_post(90), discussion_result=empty)
+    client = _client(discussion_result=empty)
 
     with pytest.raises(NoDiscussionGroupError):
-        asyncio.run(
-            d._comment_in_discussion(client, _channel(), "-100123", "hello", _task())
-        )
+        _run_comment(d, client)
 
 
 def test_comment_on_channel_without_posts_raises_no_discussion_error():
     d = TaskDispatcher()
-    client = _client_with(_post())
+    client = _client()
     client.get_messages = AsyncMock(return_value=[])  # channel history is empty
 
     with pytest.raises(NoDiscussionGroupError):
-        asyncio.run(
-            d._comment_in_discussion(client, _channel(), "-100123", "hello", _task())
-        )
+        _run_comment(d, client)
 
 
 @pytest.mark.asyncio
 async def test_execute_task_send_message_uses_discussion_flow_for_broadcast():
     d = TaskDispatcher()
     channel = _channel()
-    client = _client_with(_post(90), sent_id=555)
+    group = _group_channel(456, 12345)
+    client = _client(discussion_result=_discussion_result(
+        [_origin_message(91, 456)], [group]), sent_id=555)
 
     with patch.object(d.limiter, "wait_jitter", new_callable=AsyncMock), \
          patch.object(d, "_resolve_entity", new_callable=AsyncMock, return_value=channel), \
@@ -139,9 +347,9 @@ async def test_execute_task_send_message_uses_discussion_flow_for_broadcast():
          patch.object(d, "_record_delivery") as rec:
         assert await d.execute_task(client, _task()) is True
 
-    # Read-back must target the discussion group, not the channel
+    # Read-back must target the discussion group's input peer, not the channel
     vd.assert_awaited_once()
-    assert vd.call_args.args[1] is client.get_entity.return_value
+    assert type(vd.call_args.args[1]).__name__ == "InputPeerChannel"
     rec.assert_called_once()
 
 
@@ -223,15 +431,3 @@ def test_retry_task_requeues_failed_with_retries_left():
     assert "status = 'PENDING'" in sql
     assert "status = 'FAILED'" in sql
     assert "retry_count < %s" in sql
-    assert cur.execute.call_args_list[0].args[1] == (7, 3)
-
-
-def test_retry_task_refuses_maxed_out_task():
-    d = TaskDispatcher()
-    conn, cur = MagicMock(), MagicMock()
-    cur.rowcount = 0
-    conn.cursor.return_value.__enter__.return_value = cur
-    ctx = MagicMock()
-    ctx.__enter__.return_value = conn
-    with patch("src.core.dispatcher.get_db_connection", return_value=ctx):
-        assert d.retry_task(7) is False

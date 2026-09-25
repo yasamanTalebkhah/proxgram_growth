@@ -328,6 +328,8 @@ class TaskDispatcher:
         if action == "SEND_MESSAGE":
             read_entity = entity
             if self._is_broadcast_channel(entity):
+                # The comment lands in the discussion group — read back
+                # there, not on the broadcast channel itself.
                 sent_id, read_entity = await self._comment_in_discussion(
                     client, entity, target, message_text, task
                 )
@@ -367,54 +369,127 @@ class TaskDispatcher:
                                      message_text: str, task: Dict[str, Any]) -> Optional[int]:
         """Comment on the latest post of a broadcast channel via its discussion group.
 
-        Broadcast channels reject direct user sends (CHAT_WRITE_FORBIDDEN),
-        so growth comments must be posted as replies to the channel's most
-        recent post inside the linked discussion group. Telegram resolves
-        the "discussion thread" for us: GetDiscussionMessageRequest maps a
-        channel post to its discussion-group message, which we then reply
-        to. The thread origin (discussion_message.id) is used as reply_to
-        per Telegram's comment-thread convention.
+        Broadcast channels reject direct user sends (CHAT_WRITE_FORBIDDEN /
+        CHAT_ADMIN_REQUIRED), so growth comments must be posted as replies
+        to the channel's most recent post inside the linked discussion
+        group. GetDiscussionMessageRequest maps a channel post to its
+        discussion-group message; the comment is sent TO THE DISCUSSION
+        GROUP (never to the channel) with reply_to set to the thread
+        origin message id — Telegram's comment-thread convention.
 
-        Raises NoDiscussionGroupError when the channel has no linked
-        discussion group or comments are disabled — callers turn that into
-        a terminal SKIPPED rather than burning retries on a task that can
+        Before sending, the account auto-joins the discussion group
+        (JoinChannelRequest); UserAlreadyParticipantError is swallowed.
+        A private/join-approval group, a write-forbidden group or a locked
+        comment thread raises NoDiscussionGroupError so the caller marks
+        the task SKIPPED — terminal, no retry loops on tasks that can
         never succeed.
 
         Returns (telegram message id of the posted comment — for read-back
         verification — and the discussion-group entity), or (None, group)
         when the id cannot be determined.
         """
+        from telethon.errors import (
+            ChannelPrivateError,
+            ChatWriteForbiddenError,
+            InviteRequestSentError,
+            MsgIdInvalidError,
+            UserAlreadyParticipantError,
+            UserBannedInChannelError,
+        )
+        from telethon.tl.functions.channels import JoinChannelRequest
+
         posts = await client.get_messages(channel_entity, limit=1)
         post = posts[0] if posts else None
         if post is None or getattr(post, "service", False):
             raise NoDiscussionGroupError(f"Channel {target} has no posts to comment on")
 
-        discussion = await client(GetDiscussionMessageRequest(
-            peer=channel_entity,
-            msg_id=post.id,
-        ))
-        # Telegram answers with messages.DiscussionMessage; an empty/absent
-        # message list means the post has no comment thread to reply into.
-        discussion_message = (getattr(discussion, "messages", None) or [None])[0]
-        if discussion_message is None:
+        try:
+            discussion = await client(GetDiscussionMessageRequest(
+                peer=channel_entity,
+                msg_id=post.id,
+            ))
+        except ChannelPrivateError as cpe:
+            raise NoDiscussionGroupError(
+                f"Channel {target} discussion is private or join-approval gated: {cpe}"
+            )
+        except MsgIdInvalidError as mii:
+            # Telegram raises MSG_ID_INVALID for GetDiscussionMessageRequest
+            # when the channel has NO linked discussion group (comments
+            # disabled) — there is no thread to resolve. Terminal skip.
+            raise NoDiscussionGroupError(
+                f"Channel {target} post {post.id} has no comment thread "
+                f"(comments disabled or no discussion linked): {mii}"
+            )
+        # Telegram answers with messages.DiscussionMessage. Resolve the
+        # thread EXACTLY like Telethon's own comment support
+        # (client._get_comment_data): every message in the response lives
+        # in the DISCUSSION GROUP's id sequence, so the thread origin is
+        # the lowest-id message, and the discussion chat is the entry in
+        # discussion.chats matching that message's channel id. Taking
+        # messages[0] blindly can select the channel-side post and send
+        # the comment to the broadcast channel — which fails with
+        # CHAT_ADMIN_REQUIRED.
+        messages = list(getattr(discussion, "messages", None) or [])
+        if not messages:
             raise NoDiscussionGroupError(
                 f"Channel {target} post {post.id} has no linked discussion (comments disabled?)"
             )
-
-        # The discussion entity is a megagroup Chat (discussion group); a
-        # bare int would be ambiguous, so build the proper peer from it.
-        discussion_entity = await client.get_entity(
-            utils.get_peer_id(getattr(discussion_message, "peer_id", None) or discussion.chats[0])
+        origin = min(messages, key=lambda m: getattr(m, "id", 0))
+        origin_channel_id = getattr(getattr(origin, "peer_id", None), "channel_id", None)
+        discussion_chat = next(
+            (c for c in (getattr(discussion, "chats", None) or [])
+             if getattr(c, "id", None) == origin_channel_id),
+            None,
         )
+        if discussion_chat is None:
+            raise NoDiscussionGroupError(
+                f"Channel {target} post {post.id} discussion group could not be resolved"
+            )
+        discussion_message_id = origin.id
+        discussion_entity = utils.get_input_peer(discussion_chat)
 
-        sent = await client.send_message(
-            discussion_entity,
-            message_text,
-            reply_to=discussion_message.id,
-        )
+        # Auto-join the discussion group so the account may comment. A
+        # private/approval-gated group is a terminal skip, not a retry.
+        try:
+            await client(JoinChannelRequest(discussion_entity))
+        except UserAlreadyParticipantError:
+            pass
+        except InviteRequestSentError as ire:
+            # Approval-gated group: the join REQUEST was sent but an admin
+            # must approve it — the account cannot comment now, and no
+            # retry will change that until approval happens.
+            raise NoDiscussionGroupError(
+                f"Discussion group for {target} requires admin join approval "
+                f"(request sent): {ire}"
+            )
+        except ChannelPrivateError as cpe:
+            raise NoDiscussionGroupError(
+                f"Discussion group for {target} is private or requires join approval: {cpe}"
+            )
+        # Account-level send restrictions surface the same way regardless
+        # of which lock is hit — either the group forbids the write or the
+        # account may not post there. Both are terminal for the task.
+        try:
+            from telethon.errors import ChatAdminRequiredError
+
+            forbidden = (ChatWriteForbiddenError, UserBannedInChannelError,
+                         ChatAdminRequiredError)
+        except ImportError:  # very old Telethon
+            forbidden = (ChatWriteForbiddenError, UserBannedInChannelError)
+        try:
+            sent = await client.send_message(
+                discussion_entity,
+                message_text,
+                reply_to=discussion_message_id,
+            )
+        except forbidden as wpe:
+            raise NoDiscussionGroupError(
+                f"Comments locked or send forbidden in discussion group for {target}: {wpe}"
+            )
+
         logger.info(
             f"Task {task['id']}: commented on post {post.id} of {target} in discussion "
-            f"group (thread origin {discussion_message.id}, comment id {getattr(sent, 'id', '?')})"
+            f"group (thread origin {discussion_message_id}, comment id {getattr(sent, 'id', '?')})"
         )
         return getattr(sent, "id", None), discussion_entity
 
@@ -437,7 +512,16 @@ class TaskDispatcher:
         Cold sessions cannot resolve marked channel ids via get_input_entity,
         but PeerChannel/PeerChat lookups work from member access alone.
         Falls back to the default path for @usernames and other forms.
+
+        Username/t.me targets come back from get_input_entity as a BARE
+        InputPeerChannel that carries no broadcast/megagroup flags — the
+        dispatcher cannot tell a broadcast channel from a discussion group
+        with it. Upgrade it to a full Channel entity via GetChannelsRequest
+        so _is_broadcast_channel() sees the real flags.
         """
+        from telethon.tl.functions.channels import GetChannelsRequest
+        from telethon.tl.types import InputChannel, InputPeerChannel
+
         parsed = self._parse_numeric_target(target)
         if parsed:
             kind, ident = parsed
@@ -446,7 +530,21 @@ class TaskDispatcher:
                 return await client.get_entity(peer)
             except ValueError as exc:
                 logger.warning(f"Peer-based resolution failed for {target}: {exc}")
-        return await client.get_input_entity(target)
+        entity = await client.get_input_entity(target)
+        if isinstance(entity, InputPeerChannel):
+            try:
+                result = await client(GetChannelsRequest(id=[
+                    InputChannel(entity.channel_id, entity.access_hash)
+                ]))
+                full = (getattr(result, "chats", None) or [None])[0]
+                if full is not None:
+                    return full
+            except Exception as exc:
+                logger.warning(
+                    f"Could not upgrade InputPeerChannel to full Channel for "
+                    f"{target}: {exc} — proceeding with bare peer"
+                )
+        return entity
 
     async def process_next_task(self) -> bool:
         if self.limiter.is_quiet_hours():
