@@ -171,7 +171,72 @@
         </div>
         <button class="btn btn-primary" @click="addChannel()" :disabled="!newTarget.trim()">+ Add target</button>
         <button class="btn" @click="bulkOpen = true" :disabled="busy">📋 Batch Add Targets</button>
+        <button class="btn" @click="openDiscover()" :disabled="busy">🔭 Discover Targets</button>
+        <span class="badge ml-1" :class="disc.running ? 'badge-warn' : (disc.error ? 'badge-bad' : 'badge-idle')"
+              :title="disc.current_keyword || disc.error || ''"
+              x-text="disc.running ? 'discovering…' : (disc.error ? 'disc: error' : 'disc idle')"></span>
         <button class="btn btn-danger ml-auto" @click="askPurgeChannels()" :disabled="!targets.length">🗑 Clear all targets</button>
+      </div>
+    </div>
+
+    <!-- discovery modal -->
+    <div class="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm grid place-items-center p-4" x-show="discOpen" x-cloak @click.self="discOpen=false">
+      <div class="card w-full max-w-2xl p-6 max-h-[85vh] overflow-y-auto" x-show="discOpen">
+        <div class="flex items-center justify-between mb-1">
+          <h3 class="text-lg font-bold text-white">Discover Targets</h3>
+          <span class="badge" :class="disc.running ? 'badge-warn' : 'badge-idle'" x-text="disc.running ? 'RUNNING' : 'IDLE'"></span>
+        </div>
+        <p class="text-xs text-slate-400 mb-3">Persian keyword search + forward-graph scan. Candidates are pre-validated zero-join: only channels with a verified commentable discussion group are added (tag <span class="font-mono">auto_discovered</span>). Never joins anything.</p>
+        <div class="space-y-3">
+          <div>
+            <label class="text-xs text-slate-400">Keyword pools (click to add)</label>
+            <div class="flex flex-wrap gap-1.5 mt-1">
+              <template x-for="kw in discDefaults" :key="kw">
+                <button class="badge !px-2 !py-1 cursor-pointer transition" :class="discKeywords.includes(kw) ? 'badge-ok' : 'badge-idle'"
+                        @click="discKeywords.includes(kw) ? discKeywords = discKeywords.filter(k => k !== kw) : discKeywords.push(kw)"
+                        x-text="kw"></button>
+              </template>
+            </div>
+          </div>
+          <div>
+            <label class="text-xs text-slate-400">Custom keywords (comma or newline separated, optional)</label>
+            <textarea class="input font-mono text-xs mt-1" rows="2" x-model="discCustom" placeholder="ارز دیجیتال, تتر, قیمت طلا"></textarea>
+          </div>
+          <div class="flex gap-3">
+            <div class="grow">
+              <label class="text-xs text-slate-400">Max channels to accept</label>
+              <input class="input mt-1" type="number" min="1" max="25" x-model.number="discLimit">
+            </div>
+            <div class="grow">
+              <label class="text-xs text-slate-400">Jitter between searches</label>
+              <input class="input mt-1 bg-black/10" disabled value="15–45s (fixed)">
+            </div>
+          </div>
+          <div class="bg-black/30 rounded-xl p-3 text-xs" x-show="disc.running || disc.scanned">
+            <div class="flex gap-4 font-semibold">
+              <span class="text-slate-300">scanned <b class="text-white" x-text="disc.scanned"></b></span>
+              <span class="text-emerald-300">accepted <b x-text="disc.accepted"></b></span>
+              <span class="text-amber-300">discarded <b x-text="disc.discarded"></b></span>
+            </div>
+            <div class="text-slate-400 mt-1" x-show="disc.current_keyword" x-text="'searching: ' + disc.current_keyword"></div>
+            <div class="mt-1.5 h-1.5 bg-white/10 rounded-full overflow-hidden">
+              <div class="h-full bg-emerald-400/70 transition-all" :style="'width:' + discProgress() + '%'"></div>
+            </div>
+            <div class="text-slate-500 mt-1.5 space-y-0.5 max-h-24 overflow-y-auto">
+              <template x-for="(d,i) in disc.discards" :key="i">
+                <div class="truncate" x-text="'✗ ' + d"></div>
+              </template>
+              <template x-for="(a,i) in disc.accepted_targets" :key="'a'+i">
+                <div class="text-emerald-400/90 truncate" x-text="'✓ accepted ' + a"></div>
+              </template>
+            </div>
+          </div>
+        </div>
+        <div class="mt-5 flex justify-end gap-2">
+          <button class="btn" @click="discOpen=false">Close</button>
+          <button class="btn btn-primary" @click="startDiscovery()" :disabled="disc.running || busy"
+                  x-text="disc.running ? 'Running…' : 'Start discovery'"></button>
+        </div>
       </div>
     </div>
 
@@ -572,6 +637,8 @@ function dash() {
     errorModal: null,
     confirmBox: null,
     tplModalOpen: false, tplForm: { id: null, name: '', template: '', is_active: false }, tplPreview: [],
+    discOpen: false, discKeywords: [], discCustom: '', discLimit: 5,
+    disc: {}, discDefaults: [], discTimer: null,
     fStatus: '', fTarget: '', fSince: '', toastMsg: '', toastOk: true,
 
     connChips() {
@@ -646,6 +713,51 @@ function dash() {
     async purgeChannels() { const r = await this.api('/api/channels/purge', { method: 'POST' }); this.toast(`Cleared ${r.cleared} target(s)`); this.loadChannels(); this.refresh(); },
     askPurgeChannels() {
       this.confirmBox = { title: 'Clear ALL targets?', message: 'Every configured target channel will be removed. The seeder will have nothing to seed until you add targets again.', confirmLabel: 'Clear all', onConfirm: () => this.purgeChannels() };
+    },
+    async openDiscover() {
+      this.discOpen = true;
+      this.pollDiscovery();
+      clearInterval(this.discTimer);
+      this.discTimer = setInterval(() => {
+        if (this.discOpen) this.pollDiscovery();
+        else clearInterval(this.discTimer);
+      }, 3000);
+    },
+    async pollDiscovery() {
+      try {
+        const d = await (await fetch('/api/channels/discover/status')).json();
+        this.disc = d;
+        this.discDefaults = d.default_keywords || [];
+        if (this.discJustFinished) {
+          this.discJustFinished = false;
+          this.loadChannels(); this.refresh();
+          this.toast(`Discovery done: ${d.accepted} accepted, ${d.discarded} discarded`);
+        }
+        if (!d.running && this.discWasRunning) {
+          this.discWasRunning = false; this.discJustFinished = true;
+          this.loadChannels(); this.refresh();
+        } else if (d.running) { this.discWasRunning = true; }
+      } catch (e) {}
+    },
+    discProgress() {
+      const total = (this.disc.keywords || []).length;
+      if (!total) return this.disc.running ? 10 : 0;
+      const frac = Math.min(1, (this.disc.accepted + this.disc.discarded) / Math.max(1, this.disc.scanned || 1));
+      return this.disc.running ? Math.max(8, Math.round(frac * 90)) : 100;
+    },
+    async startDiscovery() {
+      const custom = this.discCustom.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+      const keywords = this.discKeywords.concat(custom);
+      this.busy = true;
+      try {
+        await this.api('/api/channels/discover', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ keywords: keywords.length ? keywords : null, limit: this.discLimit }),
+        });
+        this.toast('Discovery started in background');
+        this.discWasRunning = true;
+        this.pollDiscovery();
+      } catch (e) {} this.busy = false;
     },
     async bulkImport() {
       this.busy = true;

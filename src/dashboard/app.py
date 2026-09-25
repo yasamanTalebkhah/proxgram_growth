@@ -58,6 +58,11 @@ templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 app = FastAPI(title="ProxGram Growth Dashboard", docs_url=None, redoc_url=None)
 dispatcher = TaskDispatcher()
 
+# Phase 2: discovery engine routes (mounted before the /{page} catch-all).
+from src.api.routes import router as discovery_router  # noqa: E402
+
+app.include_router(discovery_router)
+
 
 @app.get("/", response_class=HTMLResponse)
 def overview(request: Request):

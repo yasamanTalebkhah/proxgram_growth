@@ -182,7 +182,7 @@ def test_channel_toggle_post_still_works():
 # ------------------------------------------------------------- routing -----
 
 def test_all_spec_routes_registered():
-    routes = {r.path for r in app.routes}
+    routes = {getattr(r, "path", "") for r in app.routes} - {""}
     for expected in ("/api/tasks/purge", "/api/tasks/seed", "/api/tasks/{task_id}",
                      "/api/templates", "/api/templates/{template_id}",
                      "/api/templates/{template_id}/toggle",

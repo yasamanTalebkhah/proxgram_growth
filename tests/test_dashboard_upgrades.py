@@ -90,7 +90,7 @@ def test_kpis_include_active_accounts():
 
 def test_settings_table_untouched_by_import_changes():
     """Guard: message_templates/target_channels routes still registered."""
-    routes = {r.path for r in app.routes}
+    routes = {getattr(r, "path", "") for r in app.routes} - {""}
     assert "/api/channels/bulk-import" in routes
     assert "/api/tasks/{task_id}/retry" in routes
     assert "/api/studio/templates" in routes
