@@ -54,6 +54,25 @@ CREATE TABLE IF NOT EXISTS target_channels (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Target Auto-Discovery pool: candidates mined from the channel graph
+-- (peer recommendations, forward chains, manual seeds) that await
+-- discussion-group validation before promotion into target_channels.
+-- Lifecycle: PENDING_VALIDATION -> VALIDATED_HAS_DISCUSSION | DISQUALIFIED_NO_DISCUSSION | FAILED
+CREATE TABLE IF NOT EXISTS discovered_targets (
+    id SERIAL PRIMARY KEY,
+    username_or_link VARCHAR(255) UNIQUE NOT NULL,
+    source_seed VARCHAR(255),
+    discovery_method VARCHAR(50) NOT NULL DEFAULT 'SIMILAR_CHANNELS',
+    status VARCHAR(50) NOT NULL DEFAULT 'PENDING_VALIDATION',
+    linked_chat_id BIGINT,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    last_checked_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_discovered_targets_status ON discovered_targets (status);
+CREATE INDEX IF NOT EXISTS idx_discovered_targets_created ON discovered_targets (created_at);
+
 -- Message templates managed via the Spintax Studio
 CREATE TABLE IF NOT EXISTS message_templates (
     id SERIAL PRIMARY KEY,

@@ -175,6 +175,10 @@
         <span class="badge ml-1" :class="disc.running ? 'badge-warn' : (disc.error ? 'badge-bad' : 'badge-idle')"
               :title="disc.current_keyword || disc.error || ''"
               x-text="disc.running ? 'discovering…' : (disc.error ? 'disc: error' : 'disc idle')"></span>
+        <button class="btn" @click="openPipeline()" :disabled="busy">🕸 Auto-Discovery</button>
+        <span class="badge" :class="pipeBusy() ? 'badge-warn' : (pipe?.error ? 'badge-bad' : 'badge-idle')"
+              :title="pipe?.pool ? ('pool: ' + pipe.pool.validated + ' validated · ' + pipe.pool.disqualified + ' disqualified') : ''"
+              x-text="pipeBadge()"></span>
         <button class="btn btn-danger ml-auto" @click="askPurgeChannels()" :disabled="!targets.length">🗑 Clear all targets</button>
       </div>
     </div>
@@ -236,6 +240,44 @@
           <button class="btn" @click="discOpen=false">Close</button>
           <button class="btn btn-primary" @click="startDiscovery()" :disabled="disc.running || busy"
                   x-text="disc.running ? 'Running…' : 'Start discovery'"></button>
+        </div>
+      </div>
+    </div>
+
+    <!-- auto-discovery pipeline modal -->
+    <div class="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm grid place-items-center p-4" x-show="pipeOpen" x-cloak @click.self="pipeOpen=false">
+      <div class="card w-full max-w-2xl p-6 max-h-[85vh] overflow-y-auto" x-show="pipeOpen">
+        <div class="flex items-center justify-between mb-1">
+          <h3 class="text-lg font-bold text-white">Auto-Discovery Pipeline</h3>
+          <span class="badge" :class="pipeBusy() ? 'badge-warn' : 'badge-idle'" x-text="pipeBusy() ? 'RUNNING' : 'IDLE'"></span>
+        </div>
+        <p class="text-xs text-slate-400 mb-3">Network-graph miner: walks Telegram's peer recommendations and forward links outward from your seed targets, then validates each candidate via its linked discussion group before promoting it (tag <span class="font-mono">auto_discovery</span>). Read-only toward Telegram — never joins anything.</p>
+        <div class="grid grid-cols-4 gap-2 mb-4 text-center">
+          <div class="bg-black/30 rounded-xl p-3"><div class="text-2xl font-bold text-white" x-text="pipe?.pool?.total ?? 0"></div><div class="text-xs text-slate-400">discovered</div></div>
+          <div class="bg-black/30 rounded-xl p-3"><div class="text-2xl font-bold text-amber-300" x-text="pipe?.pool?.pending ?? 0"></div><div class="text-xs text-slate-400">pending</div></div>
+          <div class="bg-black/30 rounded-xl p-3"><div class="text-2xl font-bold text-emerald-300" x-text="pipe?.pool?.validated ?? 0"></div><div class="text-xs text-slate-400">validated</div></div>
+          <div class="bg-black/30 rounded-xl p-3"><div class="text-2xl font-bold text-rose-300" x-text="pipe?.pool?.disqualified ?? 0"></div><div class="text-xs text-slate-400">disqualified</div></div>
+        </div>
+        <div class="bg-black/30 rounded-xl p-3 text-xs" x-show="pipeBusy() || (pipe?.last_sweeps?.length) || (pipe?.validated)">
+          <div class="text-slate-400" x-show="pipe?.current_seed" x-text="'crawling: ' + (pipe?.current_seed || '')"></div>
+          <div class="text-slate-400" x-show="pipe?.current_target" x-text="'validating: ' + (pipe?.current_target || '')"></div>
+          <div class="flex gap-4 font-semibold mt-1">
+            <span class="text-emerald-300">validated <b x-text="pipe?.validated ?? 0"></b></span>
+            <span class="text-rose-300">disqualified <b x-text="pipe?.disqualified ?? 0"></b></span>
+          </div>
+          <div class="text-slate-500 mt-1.5 space-y-0.5 max-h-24 overflow-y-auto">
+            <template x-for="(s,i) in (pipe?.last_sweeps || [])" :key="'s'+i">
+              <div class="truncate" x-text="'🕸 ' + s.seed + ': +' + s.added + ' pending (' + s.recommendations + ' recs, ' + s.mined + ' mined)'"></div>
+            </template>
+            <template x-for="(p,i) in (pipe?.promoted || [])" :key="'p'+i">
+              <div class="text-emerald-400/90 truncate" x-text="'✓ promoted ' + p"></div>
+            </template>
+          </div>
+        </div>
+        <div class="mt-5 flex justify-end gap-2">
+          <button class="btn" @click="pipeOpen=false">Close</button>
+          <button class="btn" @click="triggerCrawler()" :disabled="pipeBusy() || busy" x-text="pipe?.crawler?.running ? 'Crawling…' : '🕸 Crawl seeds'"></button>
+          <button class="btn btn-primary" @click="triggerValidator()" :disabled="pipeBusy() || busy" x-text="pipe?.running ? 'Validating…' : '✅ Validate pool'"></button>
         </div>
       </div>
     </div>
@@ -639,6 +681,7 @@ function dash() {
     tplModalOpen: false, tplForm: { id: null, name: '', template: '', is_active: false }, tplPreview: [],
     discOpen: false, discKeywords: [], discCustom: '', discLimit: 5,
     disc: {}, discDefaults: [], discTimer: null,
+    pipeOpen: false, pipe: {}, pipeTimer: null, pipeWasRunning: false, pipeJustFinished: false,
     fStatus: '', fTarget: '', fSince: '', toastMsg: '', toastOk: true,
 
     connChips() {
@@ -703,7 +746,7 @@ function dash() {
     async loadAccounts() { this.accounts = (await this.api('/api/accounts', {}, 1)).accounts.map(a => ({ ...a, checking: false, check_result: null })); },
     async healthcheck(a) { a.checking = true; try { a.check_result = await this.api(`/api/accounts/${a.id}/healthcheck`, { method: 'POST' }, 1); } catch (e) { a.check_result = { ok: false, error: e.message }; } a.checking = false; },
 
-    async loadChannels() { this.targets = (await this.api('/api/channels', {}, 1)).targets; },
+    async loadChannels() { this.targets = (await this.api('/api/channels', {}, 1)).targets; this.pollPipeline(); },
     async addChannel() { try { await this.api('/api/channels', { method: 'POST', body: new URLSearchParams({ target: this.newTarget, tag: this.newTag }) }); this.newTarget = ''; this.newTag = ''; this.toast('Target added'); this.loadChannels(); } catch (e) {} },
     async toggleChannel(id) { await this.api(`/api/channels/${id}/toggle`, { method: 'PATCH' }); this.loadChannels(); },
     async deleteChannel(id) { await this.api(`/api/channels/${id}`, { method: 'DELETE' }); this.toast('Target deleted'); this.loadChannels(); },
@@ -757,6 +800,56 @@ function dash() {
         this.toast('Discovery started in background');
         this.discWasRunning = true;
         this.pollDiscovery();
+      } catch (e) {} this.busy = false;
+    },
+    async openPipeline() {
+      this.pipeOpen = true;
+      this.pollPipeline();
+      clearInterval(this.pipeTimer);
+      this.pipeTimer = setInterval(() => {
+        if (this.pipeOpen) this.pollPipeline();
+        else clearInterval(this.pipeTimer);
+      }, 3000);
+    },
+    async pollPipeline() {
+      try {
+        const s = await (await fetch('/api/discovery/stats')).json();
+        this.pipe = s;
+        if (this.pipeJustFinished) {
+          this.pipeJustFinished = false;
+          this.loadChannels(); this.refresh();
+          this.toast(`Pipeline done: ${s.validated} validated, ${s.disqualified} disqualified`);
+        }
+        const busy = !!(s.running || s.crawler?.running);
+        if (!busy && this.pipeWasRunning) {
+          this.pipeWasRunning = false; this.pipeJustFinished = true;
+          this.loadChannels(); this.refresh();
+        } else if (busy) { this.pipeWasRunning = true; }
+      } catch (e) {}
+    },
+    pipeBadge() {
+      if (this.pipe?.running) return 'validating…';
+      if (this.pipe?.crawler?.running) return 'crawling…';
+      if (this.pipe?.error) return 'pipeline: error';
+      return 'pool: ' + (this.pipe?.pool?.pending ?? 0) + ' pending';
+    },
+    pipeBusy() { return !!(this.pipe?.running || this.pipe?.crawler?.running); },
+    async triggerCrawler() {
+      this.busy = true;
+      try {
+        await this.api('/api/discovery/trigger-crawler', { method: 'POST' });
+        this.toast('Crawler started in background');
+        this.pipeWasRunning = true;
+        this.pollPipeline();
+      } catch (e) {} this.busy = false;
+    },
+    async triggerValidator() {
+      this.busy = true;
+      try {
+        await this.api('/api/discovery/trigger-validator', { method: 'POST' });
+        this.toast('Validator started in background');
+        this.pipeWasRunning = true;
+        this.pollPipeline();
       } catch (e) {} this.busy = false;
     },
     async bulkImport() {

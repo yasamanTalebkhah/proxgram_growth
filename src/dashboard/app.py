@@ -63,6 +63,11 @@ from src.api.routes import router as discovery_router  # noqa: E402
 
 app.include_router(discovery_router)
 
+# Target auto-discovery pipeline: crawler/validator triggers + pool stats.
+from src.api.discovery_routes import router as discovery_pipeline_router  # noqa: E402
+
+app.include_router(discovery_pipeline_router)
+
 
 @app.get("/", response_class=HTMLResponse)
 def overview(request: Request):
