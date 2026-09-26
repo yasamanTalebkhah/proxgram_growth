@@ -288,15 +288,17 @@ async def validate_target(client: TelegramClient, handle: str) -> Dict[str, Any]
 
 
 async def validate_batch(client: TelegramClient,
-                         batch: Optional[List[Dict[str, Any]]] = None) -> Dict[str, int]:
+                         batch: Optional[List[Dict[str, Any]]] = None,
+                         single: Optional[Dict[str, Any]] = None) -> Dict[str, int]:
     """Validate one batch of pending targets. FloodWait pauses the batch.
 
     On FloodWaitError the remaining targets stay PENDING_VALIDATION —
-    nothing is dropped; the next run picks them up.
+    nothing is dropped; the next run picks them up. `single` validates one
+    explicit pool row instead of pulling the pending queue (re-probes).
     """
     counts = {"checked": 0, "validated": 0, "disqualified": 0}
     if batch is None:
-        batch = fetch_pending(BATCH_SIZE)
+        batch = [single] if single else fetch_pending(BATCH_SIZE)
 
     for row in batch:
         target_id = row["id"]
@@ -355,8 +357,13 @@ def _pause_for_flood_wait(fwe: FloodWaitError) -> float:
 
 # ------------------------------------------------------------- run control ---
 
-def run_validation(limit: int = BATCH_SIZE) -> Dict[str, Any]:
-    """Synchronous validation run (caller wraps in a thread for background)."""
+def run_validation(limit: int = BATCH_SIZE,
+                   single_id: Optional[int] = None) -> Dict[str, Any]:
+    """Synchronous validation run (caller wraps in a thread for background).
+
+    With `single_id`, validates exactly that discovered_targets row
+    (operator re-probe); it must already be PENDING_VALIDATION.
+    """
     if VALIDATOR_STATE.running:
         return {"ok": False, "detail": "validator already running"}
 
@@ -369,12 +376,24 @@ def run_validation(limit: int = BATCH_SIZE) -> Dict[str, Any]:
         VALIDATOR_STATE.finish(error="no active account for validator")
         return {"ok": False, "detail": "no active account for validator"}
 
-    batch = fetch_pending(limit)
+    zero_counts = {"checked": 0, "validated": 0, "disqualified": 0}
+    if single_id:
+        from src.services.discovery_studio import get_target_record
+
+        record = get_target_record(single_id)
+        if record is None:
+            return {"ok": False, "detail": "target not found", "counts": zero_counts}
+        if record["status"] != "PENDING_VALIDATION":
+            return {"ok": False,
+                    "detail": f"target status is {record['status']}, not PENDING_VALIDATION",
+                    "counts": zero_counts}
+        batch = [{"id": record["id"], "username": record["username"], "attempts": 0}]
+    else:
+        batch = fetch_pending(limit)
     if not batch:
         VALIDATOR_STATE.start()
         VALIDATOR_STATE.finish()
-        return {"ok": True, "detail": "no pending targets to validate", "counts": {
-            "checked": 0, "validated": 0, "disqualified": 0}}
+        return {"ok": True, "detail": "no pending targets to validate", "counts": zero_counts}
 
     VALIDATOR_STATE.start()
     client = manager.create_client(accounts[0]["session_string"],
@@ -390,11 +409,11 @@ def run_validation(limit: int = BATCH_SIZE) -> Dict[str, Any]:
     except FloodWaitError as fwe:
         wait = _pause_for_flood_wait(fwe)
         VALIDATOR_STATE.finish(error=f"paused {wait}s for Telegram FloodWait")
-        counts = {"checked": 0, "validated": 0, "disqualified": 0}
+        counts = dict(zero_counts)
     except Exception as exc:
         logger.exception("Validation run failed")
         VALIDATOR_STATE.finish(error=f"{type(exc).__name__}: {exc}")
-        counts = {"checked": 0, "validated": 0, "disqualified": 0}
+        counts = dict(zero_counts)
 
     snap = VALIDATOR_STATE.snapshot()
     snap["ok"] = True
@@ -402,11 +421,16 @@ def run_validation(limit: int = BATCH_SIZE) -> Dict[str, Any]:
     return snap
 
 
-def start_background_validation(limit: Optional[int] = None) -> Dict[str, Any]:
+def start_background_validation(limit: Optional[int] = None,
+                                single_id: Optional[int] = None) -> Dict[str, Any]:
     """Kick off validation in a daemon thread (never blocks the API/worker)."""
     if VALIDATOR_STATE.running:
         return {"ok": False, "detail": "validator already running"}
-    kwargs = {"limit": limit} if limit else {}
+    kwargs: Dict[str, Any] = {}
+    if limit:
+        kwargs["limit"] = limit
+    if single_id:
+        kwargs["single_id"] = single_id
     thread = threading.Thread(
         target=run_validation, kwargs=kwargs,
         name="discussion-validator", daemon=True,

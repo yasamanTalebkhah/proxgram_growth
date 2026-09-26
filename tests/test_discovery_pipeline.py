@@ -501,7 +501,7 @@ def test_trigger_crawler_starts_background_run():
                return_value={"ok": True, "detail": "crawler started in background"}) as bg:
         resp = client.post("/api/discovery/trigger-crawler")
     assert resp.status_code == 200
-    bg.assert_called_once()
+    bg.assert_called_once_with(max_seeds=5)
 
 
 def test_trigger_crawler_conflicts_when_running():
@@ -515,7 +515,7 @@ def test_trigger_validator_starts_background_run():
                return_value={"ok": True, "detail": "validator started in background"}) as bg:
         resp = client.post("/api/discovery/trigger-validator")
     assert resp.status_code == 200
-    bg.assert_called_once()
+    bg.assert_called_once_with(limit=25)
 
 
 def test_trigger_validator_conflicts_when_running():

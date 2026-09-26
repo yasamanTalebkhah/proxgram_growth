@@ -175,7 +175,7 @@
         <span class="badge ml-1" :class="disc.running ? 'badge-warn' : (disc.error ? 'badge-bad' : 'badge-idle')"
               :title="disc.current_keyword || disc.error || ''"
               x-text="disc.running ? 'discovering…' : (disc.error ? 'disc: error' : 'disc idle')"></span>
-        <button class="btn" @click="openPipeline()" :disabled="busy">🕸 Auto-Discovery</button>
+        <button class="btn" @click="openPipeline()" :disabled="busy">🕸 Auto-Discovery Studio</button>
         <span class="badge" :class="pipeBusy() ? 'badge-warn' : (pipe?.error ? 'badge-bad' : 'badge-idle')"
               :title="pipe?.pool ? ('pool: ' + pipe.pool.validated + ' validated · ' + pipe.pool.disqualified + ' disqualified') : ''"
               x-text="pipeBadge()"></span>
@@ -252,11 +252,13 @@
           <span class="badge" :class="pipeBusy() ? 'badge-warn' : 'badge-idle'" x-text="pipeBusy() ? 'RUNNING' : 'IDLE'"></span>
         </div>
         <p class="text-xs text-slate-400 mb-3">Network-graph miner: walks Telegram's peer recommendations and forward links outward from your seed targets, then validates each candidate via its linked discussion group before promoting it (tag <span class="font-mono">auto_discovery</span>). Read-only toward Telegram — never joins anything.</p>
-        <div class="grid grid-cols-4 gap-2 mb-4 text-center">
-          <div class="bg-black/30 rounded-xl p-3"><div class="text-2xl font-bold text-white" x-text="pipe?.pool?.total ?? 0"></div><div class="text-xs text-slate-400">discovered</div></div>
-          <div class="bg-black/30 rounded-xl p-3"><div class="text-2xl font-bold text-amber-300" x-text="pipe?.pool?.pending ?? 0"></div><div class="text-xs text-slate-400">pending</div></div>
-          <div class="bg-black/30 rounded-xl p-3"><div class="text-2xl font-bold text-emerald-300" x-text="pipe?.pool?.validated ?? 0"></div><div class="text-xs text-slate-400">validated</div></div>
-          <div class="bg-black/30 rounded-xl p-3"><div class="text-2xl font-bold text-rose-300" x-text="pipe?.pool?.disqualified ?? 0"></div><div class="text-xs text-slate-400">disqualified</div></div>
+        <div class="grid grid-cols-3 md:grid-cols-6 gap-2 mb-4 text-center">
+          <div class="bg-black/30 rounded-xl p-3"><div class="text-2xl font-bold text-white" x-text="pipe?.total_discovered ?? pipe?.pool?.total ?? 0"></div><div class="text-xs text-slate-400">total pool</div></div>
+          <div class="bg-black/30 rounded-xl p-3"><div class="text-2xl font-bold text-amber-300" x-text="pipe?.pending_count ?? pipe?.pool?.pending ?? 0"></div><div class="text-xs text-slate-400">pending queue</div></div>
+          <div class="bg-black/30 rounded-xl p-3"><div class="text-2xl font-bold text-emerald-300" x-text="pipe?.validated_count ?? pipe?.pool?.validated ?? 0"></div><div class="text-xs text-slate-400">validated</div></div>
+          <div class="bg-black/30 rounded-xl p-3"><div class="text-2xl font-bold text-rose-300" x-text="pipe?.disqualified_count ?? pipe?.pool?.disqualified ?? 0"></div><div class="text-xs text-slate-400">disqualified</div></div>
+          <div class="bg-black/30 rounded-xl p-3"><div class="text-2xl font-bold text-sky-300" x-text="pipe?.total_promoted ?? 0"></div><div class="text-xs text-slate-400">auto-promoted</div></div>
+          <div class="bg-black/30 rounded-xl p-3"><div class="text-2xl font-bold text-fuchsia-300" x-text="(pipe?.rejection_rate_percentage ?? 0) + '%'"></div><div class="text-xs text-slate-400">rejection rate</div></div>
         </div>
         <div class="bg-black/30 rounded-xl p-3 text-xs" x-show="pipeBusy() || (pipe?.last_sweeps?.length) || (pipe?.validated)">
           <div class="text-slate-400" x-show="pipe?.current_seed" x-text="'crawling: ' + (pipe?.current_seed || '')"></div>
@@ -274,7 +276,63 @@
             </template>
           </div>
         </div>
-        <div class="mt-5 flex justify-end gap-2">
+        <div class="border-t border-white/10 my-4"></div>
+        <div class="flex items-center justify-between mb-2">
+          <h4 class="font-bold text-white text-sm">Discovered Targets Pool</h4>
+          <button class="btn !py-1 !px-2" @click="loadStudio()" :disabled="studioLoading">↻ Refresh pool</button>
+        </div>
+        <div class="flex flex-wrap gap-2 mb-2">
+          <input class="input grow min-w-[160px]" placeholder="Search @handle or link…" x-model="studioSearch" @keydown.enter="loadStudio()">
+          <select class="input !w-auto" x-model="studioStatus">
+            <option value="">All statuses</option>
+            <option value="PENDING_VALIDATION">Pending</option>
+            <option value="VALIDATED_HAS_DISCUSSION">Validated</option>
+            <option value="DISQUALIFIED_NO_DISCUSSION">Disqualified</option>
+            <option value="FAILED">Failed</option>
+          </select>
+          <button class="btn btn-primary !py-1" @click="loadStudio()" :disabled="studioLoading">Filter</button>
+        </div>
+        <div class="overflow-x-auto max-h-72 border border-white/10 rounded-xl">
+          <table class="w-full min-w-[640px]">
+            <thead><tr><th class="th">Target</th><th class="th">Method</th><th class="th">Source seed</th><th class="th">Status</th><th class="th text-right">Actions</th></tr></thead>
+            <tbody>
+              <template x-for="s in studioTargets" :key="s.id">
+                <tr>
+                  <td class="td font-mono text-xs" x-text="s.username_or_link"></td>
+                  <td class="td text-xs text-slate-400" x-text="s.discovery_method"></td>
+                  <td class="td text-xs text-slate-400 font-mono max-w-[120px] truncate" x-text="s.source_seed || '—'" :title="'lineage: ' + (s.source_seed || 'manual')"></td>
+                  <td class="td"><span class="badge" :class="studioStatusClass(s.status)" x-text="studioStatusLabel(s.status)" :title="s.disqualification_reason || ''"></span></td>
+                  <td class="td text-right whitespace-nowrap">
+                    <button class="btn !py-1 !px-2" @click="reprobeTarget(s.id)" :disabled="pipeBusy()" title="Reset to PENDING and re-probe">↻</button>
+                    <button class="btn !py-1 !px-2" @click="askForcePromote(s)" :disabled="busy" title="Force promote (bypasses checks)">↑ Promote</button>
+                    <button class="btn btn-danger !py-1 !px-2" @click="askDeleteDiscovered(s)" title="Delete pool record">✕</button>
+                  </td>
+                </tr>
+              </template>
+              <tr x-show="!studioTargets.length"><td colspan="5" class="td text-slate-400">Pool is empty — run a crawl sweep.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="flex justify-between items-center mt-2 text-xs text-slate-400">
+          <span x-text="studioTotal + ' record(s)' + (studioLoading ? ' · loading…' : '')"></span>
+          <span class="flex gap-2">
+            <button class="btn !py-1 !px-2" @click="studioPage(-1)" :disabled="!studioOffset">← Prev</button>
+            <button class="btn !py-1 !px-2" @click="studioPage(1)" :disabled="studioOffset + 50 >= studioTotal">Next →</button>
+          </span>
+        </div>
+        <div class="mt-3 flex flex-wrap items-center gap-2 text-xs">
+          <label class="text-slate-400">Purge disqualified older than</label>
+          <input class="input !w-20" type="number" min="1" max="365" x-model.number="purgeDays" placeholder="days">
+          <span class="text-slate-500">days (empty = all)</span>
+          <button class="btn btn-danger !py-1" @click="askPurgeDisqualified()" :disabled="busy">🧹 Purge</button>
+        </div>
+        <div class="mt-5 flex justify-end items-center gap-2">
+          <div class="flex items-center gap-1.5 mr-auto text-xs">
+            <label class="text-slate-400">seeds</label>
+            <input class="input !w-16" type="number" min="1" max="25" x-model.number="sweepSeeds">
+            <label class="text-slate-400 ml-2">batch</label>
+            <input class="input !w-16" type="number" min="1" max="100" x-model.number="validateBatch">
+          </div>
           <button class="btn" @click="pipeOpen=false">Close</button>
           <button class="btn" @click="triggerCrawler()" :disabled="pipeBusy() || busy" x-text="pipe?.crawler?.running ? 'Crawling…' : '🕸 Crawl seeds'"></button>
           <button class="btn btn-primary" @click="triggerValidator()" :disabled="pipeBusy() || busy" x-text="pipe?.running ? 'Validating…' : '✅ Validate pool'"></button>
@@ -310,7 +368,10 @@
           <template x-for="t in targets" :key="t.id">
             <tr>
               <td class="td font-mono text-xs" x-text="t.target"></td>
-              <td class="td text-slate-400" x-text="t.tag"></td>
+              <td class="td text-slate-400">
+                <span x-text="t.tag"></span>
+                <span class="badge badge-ok ml-1" x-show="t.tag === 'auto_discovery'" title="Promoted automatically by the discovery pipeline (two-step validated)">[Auto-Discovered]</span>
+              </td>
               <td class="td" x-text="t.total_tasks"></td>
               <td class="td">
                 <label class="inline-flex items-center cursor-pointer gap-2">
@@ -682,6 +743,8 @@ function dash() {
     discOpen: false, discKeywords: [], discCustom: '', discLimit: 5,
     disc: {}, discDefaults: [], discTimer: null,
     pipeOpen: false, pipe: {}, pipeTimer: null, pipeWasRunning: false, pipeJustFinished: false,
+    studioTargets: [], studioTotal: 0, studioSearch: '', studioStatus: '', studioOffset: 0, studioLoading: false,
+    sweepSeeds: 5, validateBatch: 25, purgeDays: null,
     fStatus: '', fTarget: '', fSince: '', toastMsg: '', toastOk: true,
 
     connChips() {
@@ -805,6 +868,8 @@ function dash() {
     async openPipeline() {
       this.pipeOpen = true;
       this.pollPipeline();
+      this.studioOffset = 0;
+      this.loadStudio();
       clearInterval(this.pipeTimer);
       this.pipeTimer = setInterval(() => {
         if (this.pipeOpen) this.pollPipeline();
@@ -817,7 +882,7 @@ function dash() {
         this.pipe = s;
         if (this.pipeJustFinished) {
           this.pipeJustFinished = false;
-          this.loadChannels(); this.refresh();
+          this.loadChannels(); this.refresh(); this.loadStudio();
           this.toast(`Pipeline done: ${s.validated} validated, ${s.disqualified} disqualified`);
         }
         const busy = !!(s.running || s.crawler?.running);
@@ -837,8 +902,8 @@ function dash() {
     async triggerCrawler() {
       this.busy = true;
       try {
-        await this.api('/api/discovery/trigger-crawler', { method: 'POST' });
-        this.toast('Crawler started in background');
+        await this.api('/api/discovery/trigger-crawler', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ limit_seeds: Number(this.sweepSeeds) || 5 }) });
+        this.toast(`Crawler started (up to ${this.sweepSeeds} seeds)`);
         this.pipeWasRunning = true;
         this.pollPipeline();
       } catch (e) {} this.busy = false;
@@ -846,10 +911,61 @@ function dash() {
     async triggerValidator() {
       this.busy = true;
       try {
-        await this.api('/api/discovery/trigger-validator', { method: 'POST' });
-        this.toast('Validator started in background');
+        await this.api('/api/discovery/trigger-validator', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ batch_size: Number(this.validateBatch) || 25 }) });
+        this.toast(`Validator started (batch ${this.validateBatch})`);
         this.pipeWasRunning = true;
         this.pollPipeline();
+      } catch (e) {} this.busy = false;
+    },
+    async loadStudio() {
+      this.studioLoading = true;
+      try {
+        const params = new URLSearchParams();
+        if (this.studioStatus) params.set('status', this.studioStatus);
+        if (this.studioSearch.trim()) params.set('search', this.studioSearch.trim());
+        params.set('limit', 50); params.set('offset', this.studioOffset || 0);
+        const d = await (await fetch('/api/discovery/targets?' + params)).json();
+        this.studioTargets = d.items || []; this.studioTotal = d.total_count || 0;
+      } catch (e) {} this.studioLoading = false;
+    },
+    studioStatusClass(s) {
+      return { VALIDATED_HAS_DISCUSSION: 'badge-ok', PENDING_VALIDATION: 'badge-warn', DISQUALIFIED_NO_DISCUSSION: 'badge-bad', FAILED: 'badge-bad' }[s] || 'badge-idle';
+    },
+    studioStatusLabel(s) {
+      return { VALIDATED_HAS_DISCUSSION: 'VALIDATED', PENDING_VALIDATION: 'PENDING', DISQUALIFIED_NO_DISCUSSION: 'DISQUALIFIED', FAILED: 'FAILED' }[s] || s;
+    },
+    studioPage(dir) {
+      this.studioOffset = Math.max(0, (this.studioOffset || 0) + dir * 50);
+      this.loadStudio();
+    },
+    async reprobeTarget(id) {
+      this.busy = true;
+      try { await this.api(`/api/discovery/targets/${id}/reprobe`, { method: 'POST' }); this.toast('Re-probe queued'); this.pollPipeline(); } catch (e) {} this.busy = false;
+    },
+    askForcePromote(s) {
+      this.confirmBox = { title: 'Force promote?', message: `${s.username_or_link} will be added to target_channels with tag 'manual_promoted', bypassing all validation checks.`, confirmLabel: 'Promote', onConfirm: () => this.forcePromote(s.id) };
+    },
+    async forcePromote(id) {
+      this.busy = true;
+      try { const r = await this.api(`/api/discovery/targets/${id}/force-promote`, { method: 'POST' }); this.toast(r.detail); this.loadStudio(); this.loadChannels(); } catch (e) {} this.busy = false;
+    },
+    askDeleteDiscovered(s) {
+      this.confirmBox = { title: 'Delete pool record?', message: `${s.username_or_link} will be removed from discovered_targets permanently.`, confirmLabel: 'Delete', onConfirm: () => this.deleteDiscovered(s.id) };
+    },
+    async deleteDiscovered(id) {
+      this.busy = true;
+      try { await this.api(`/api/discovery/targets/${id}`, { method: 'DELETE' }); this.toast('Pool record deleted'); this.loadStudio(); this.pollPipeline(); } catch (e) {} this.busy = false;
+    },
+    askPurgeDisqualified() {
+      const d = this.purgeDays;
+      this.confirmBox = { title: 'Purge disqualified?', message: d ? `All DISQUALIFIED records last checked more than ${d} day(s) ago will be deleted.` : 'ALL disqualified records will be deleted from the pool.', confirmLabel: 'Purge', onConfirm: () => this.purgeDisqualified() };
+    },
+    async purgeDisqualified() {
+      this.busy = true;
+      try {
+        const body = this.purgeDays ? { days: Number(this.purgeDays) } : {};
+        const r = await this.api('/api/discovery/purge-disqualified', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        this.toast(`Purged ${r.deleted} disqualified record(s)`); this.loadStudio(); this.pollPipeline();
       } catch (e) {} this.busy = false;
     },
     async bulkImport() {

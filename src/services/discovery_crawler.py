@@ -389,12 +389,13 @@ def run_crawl(seeds: Optional[List[str]] = None,
     return snap
 
 
-def start_background_crawl(seeds: Optional[List[str]] = None) -> Dict[str, Any]:
+def start_background_crawl(seeds: Optional[List[str]] = None,
+                           max_seeds: int = MAX_SEEDS_PER_RUN) -> Dict[str, Any]:
     """Kick off a crawl in a daemon thread (never blocks the API/worker)."""
     if CRAWLER_STATE.running:
         return {"ok": False, "detail": "crawler already running"}
     thread = threading.Thread(
-        target=run_crawl, kwargs={"seeds": seeds},
+        target=run_crawl, kwargs={"seeds": seeds, "max_seeds": max_seeds},
         name="discovery-crawler", daemon=True,
     )
     thread.start()
