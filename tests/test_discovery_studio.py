@@ -321,3 +321,47 @@ def test_api_purge_disqualified_with_and_without_days():
         resp = client.post("/api/discovery/purge-disqualified")
     assert resp.json()["deleted"] == 22
     p2.assert_called_once_with(days=None)
+
+
+# ------------------------------------------------------------ autopilot API --
+
+def test_api_autopilot_status_passthrough():
+    snap = {"running": False, "current_phase": "idle", "progress_percent": 0.0,
+            "target_quota": 100, "promoted_count": 0}
+    with patch("src.api.discovery_routes.autopilot_status", return_value=snap):
+        data = client.get("/api/discovery/autopilot/status").json()
+    assert data == snap
+
+
+def test_api_autopilot_start_with_quota():
+    with patch("src.api.discovery_routes.start_background_autopilot",
+               return_value={"ok": True, "detail": "started"}) as bg:
+        resp = client.post("/api/discovery/autopilot/start", json={"quota": 42})
+    assert resp.status_code == 200
+    bg.assert_called_once_with(target_quota=42)
+
+
+def test_api_autopilot_start_defaults_and_conflict():
+    with patch("src.api.discovery_routes.start_background_autopilot",
+               return_value={"ok": True, "detail": "started"}) as bg:
+        assert client.post("/api/discovery/autopilot/start").status_code == 200
+    bg.assert_called_once_with(target_quota=100)
+    with patch("src.api.discovery_routes.start_background_autopilot",
+               return_value={"ok": False, "detail": "Auto-Pilot loop is already running"}):
+        assert client.post("/api/discovery/autopilot/start").status_code == 409
+
+
+def test_api_autopilot_start_validates_quota_range():
+    assert client.post("/api/discovery/autopilot/start", json={"quota": 4}).status_code == 422
+    assert client.post("/api/discovery/autopilot/start", json={"quota": 1001}).status_code == 422
+
+
+def test_api_autopilot_stop_and_conflict():
+    with patch("src.api.discovery_routes.stop_background_autopilot",
+               return_value={"ok": True, "detail": "Stop signal transmitted to Auto-Pilot"}) as sp:
+        resp = client.post("/api/discovery/autopilot/stop")
+    assert resp.status_code == 200
+    sp.assert_called_once()
+    with patch("src.api.discovery_routes.stop_background_autopilot",
+               return_value={"ok": False, "detail": "Auto-Pilot is not currently running"}):
+        assert client.post("/api/discovery/autopilot/stop").status_code == 409

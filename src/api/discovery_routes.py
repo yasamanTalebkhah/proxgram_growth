@@ -33,6 +33,11 @@ from src.services.discovery_studio import (
 )
 from src.services.discussion_validator import start_background_validation, validator_status
 from src.services.discovery_crawler import start_background_crawl
+from src.services.discovery_autopilot import (
+    autopilot_status,
+    start_background_autopilot,
+    stop_background_autopilot,
+)
 
 logger = logging.getLogger("discovery.studio.api")
 
@@ -55,6 +60,11 @@ class ValidateRequest(BaseModel):
 class PurgeRequest(BaseModel):
     days: Optional[int] = Field(default=None, ge=1, le=365,
                                 description="Only purge disqualified records older than this many days; omit for all")
+
+
+class AutopilotRequest(BaseModel):
+    quota: int = Field(default=100, ge=5, le=1000,
+                       description="How many validated channels to promote before the Auto-Pilot stops")
 
 
 @router.post("/trigger-crawler")
@@ -141,3 +151,28 @@ def discovery_purge_disqualified(payload: PurgeRequest | None = None):
     """Delete disqualified records (all, or only older than `days`)."""
     days = payload.days if payload else None
     return {"ok": True, "deleted": purge_disqualified(days=days)}
+
+
+@router.get("/autopilot/status")
+def discovery_autopilot_status():
+    """Auto-Pilot loop state (phase, quota progress, stop flag)."""
+    return autopilot_status()
+
+
+@router.post("/autopilot/start")
+def discovery_autopilot_start(payload: AutopilotRequest | None = None):
+    """Start the quota-driven crawl/validate Auto-Pilot loop in the background."""
+    quota = payload.quota if payload else 100
+    result = start_background_autopilot(target_quota=quota)
+    if not result.get("ok"):
+        raise HTTPException(409, result.get("detail", "autopilot unavailable"))
+    return result
+
+
+@router.post("/autopilot/stop")
+def discovery_autopilot_stop():
+    """Signal the Auto-Pilot loop to stop gracefully (honored within ~0.5s)."""
+    result = stop_background_autopilot()
+    if not result.get("ok"):
+        raise HTTPException(409, result.get("detail", "autopilot unavailable"))
+    return result
