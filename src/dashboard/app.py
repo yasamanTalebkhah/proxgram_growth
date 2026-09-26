@@ -409,7 +409,7 @@ def health():
 # Page routes LAST so the /{page} catch-all never shadows API or /health.
 @app.get("/{page}", response_class=HTMLResponse)
 def page(request: Request, page: str):
-    if page not in {"accounts", "channels", "templates", "studio", "tasks", "settings", "logs"}:
+    if page not in {"accounts", "channels", "discovery", "templates", "studio", "tasks", "settings", "logs"}:
         raise HTTPException(404, "Not found")
     return templates.TemplateResponse(request, "index.html")
 

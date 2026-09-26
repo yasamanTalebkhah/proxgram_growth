@@ -44,8 +44,8 @@
       </div>
     </div>
     <nav class="flex flex-wrap gap-1">
-      <template x-for="t in ['overview','accounts','channels','templates','studio','tasks','settings','logs']" :key="t">
-        <button class="tabbtn" :class="tab===t && 'tabbtn-active'" @click="switchTab(t)" x-text="t[0].toUpperCase()+t.slice(1)"></button>
+      <template x-for="t in [['overview','Overview'],['accounts','Accounts'],['channels','Channels'],['discovery','Discovery Radar'],['templates','Templates'],['studio','Message Studio'],['tasks','Tasks'],['settings','Settings'],['logs','Logs']]" :key="t[0]">
+        <button class="tabbtn" :class="tab===t[0] && 'tabbtn-active'" @click="switchTab(t[0])" x-text="t[1]"></button>
       </template>
     </nav>
     <div class="ml-auto flex items-center gap-2">
@@ -172,87 +172,26 @@
         <button class="btn btn-primary" @click="addChannel()" :disabled="!newTarget.trim()">+ Add target</button>
         <button class="btn" @click="bulkOpen = true" :disabled="busy">📋 Batch Add Targets</button>
         <button class="btn" @click="openDiscover()" :disabled="busy">🔭 Discover Targets</button>
-        <span class="badge ml-1" :class="disc.running ? 'badge-warn' : (disc.error ? 'badge-bad' : 'badge-idle')"
-              :title="disc.current_keyword || disc.error || ''"
-              x-text="disc.running ? 'discovering…' : (disc.error ? 'disc: error' : 'disc idle')"></span>
-        <button class="btn" @click="openPipeline()" :disabled="busy">🕸 Auto-Discovery Studio</button>
+        <button class="btn" @click="switchTab('discovery')" :disabled="busy">→ Go to Discovery Radar</button>
         <span class="badge" :class="pipeBusy() ? 'badge-warn' : (pipe?.error ? 'badge-bad' : 'badge-idle')"
               :title="pipe?.pool ? ('pool: ' + pipe.pool.validated + ' validated · ' + pipe.pool.disqualified + ' disqualified') : ''"
               x-text="pipeBadge()"></span>
         <button class="btn btn-danger ml-auto" @click="askPurgeChannels()" :disabled="!targets.length">🗑 Clear all targets</button>
       </div>
     </div>
+  </section>
 
-    <!-- discovery modal -->
-    <div class="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm grid place-items-center p-4" x-show="discOpen" x-cloak @click.self="discOpen=false">
-      <div class="card w-full max-w-2xl p-6 max-h-[85vh] overflow-y-auto" x-show="discOpen">
-        <div class="flex items-center justify-between mb-1">
-          <h3 class="text-lg font-bold text-white">Discover Targets</h3>
-          <span class="badge" :class="disc.running ? 'badge-warn' : 'badge-idle'" x-text="disc.running ? 'RUNNING' : 'IDLE'"></span>
-        </div>
-        <p class="text-xs text-slate-400 mb-3">Persian keyword search + forward-graph scan. Candidates are pre-validated zero-join: only channels with a verified commentable discussion group are added (tag <span class="font-mono">auto_discovered</span>). Never joins anything.</p>
-        <div class="space-y-3">
-          <div>
-            <label class="text-xs text-slate-400">Keyword pools (click to add)</label>
-            <div class="flex flex-wrap gap-1.5 mt-1">
-              <template x-for="kw in discDefaults" :key="kw">
-                <button class="badge !px-2 !py-1 cursor-pointer transition" :class="discKeywords.includes(kw) ? 'badge-ok' : 'badge-idle'"
-                        @click="discKeywords.includes(kw) ? discKeywords = discKeywords.filter(k => k !== kw) : discKeywords.push(kw)"
-                        x-text="kw"></button>
-              </template>
-            </div>
-          </div>
-          <div>
-            <label class="text-xs text-slate-400">Custom keywords (comma or newline separated, optional)</label>
-            <textarea class="input font-mono text-xs mt-1" rows="2" x-model="discCustom" placeholder="ارز دیجیتال, تتر, قیمت طلا"></textarea>
-          </div>
-          <div class="flex gap-3">
-            <div class="grow">
-              <label class="text-xs text-slate-400">Max channels to accept</label>
-              <input class="input mt-1" type="number" min="1" max="25" x-model.number="discLimit">
-            </div>
-            <div class="grow">
-              <label class="text-xs text-slate-400">Jitter between searches</label>
-              <input class="input mt-1 bg-black/10" disabled value="15–45s (fixed)">
-            </div>
-          </div>
-          <div class="bg-black/30 rounded-xl p-3 text-xs" x-show="disc.running || disc.scanned">
-            <div class="flex gap-4 font-semibold">
-              <span class="text-slate-300">scanned <b class="text-white" x-text="disc.scanned"></b></span>
-              <span class="text-emerald-300">accepted <b x-text="disc.accepted"></b></span>
-              <span class="text-amber-300">discarded <b x-text="disc.discarded"></b></span>
-            </div>
-            <div class="text-slate-400 mt-1" x-show="disc.current_keyword" x-text="'searching: ' + disc.current_keyword"></div>
-            <div class="mt-1.5 h-1.5 bg-white/10 rounded-full overflow-hidden">
-              <div class="h-full bg-emerald-400/70 transition-all" :style="'width:' + discProgress() + '%'"></div>
-            </div>
-            <div class="text-slate-500 mt-1.5 space-y-0.5 max-h-24 overflow-y-auto">
-              <template x-for="(d,i) in disc.discards" :key="i">
-                <div class="truncate" x-text="'✗ ' + d"></div>
-              </template>
-              <template x-for="(a,i) in disc.accepted_targets" :key="'a'+i">
-                <div class="text-emerald-400/90 truncate" x-text="'✓ accepted ' + a"></div>
-              </template>
-            </div>
-          </div>
-        </div>
-        <div class="mt-5 flex justify-end gap-2">
-          <button class="btn" @click="discOpen=false">Close</button>
-          <button class="btn btn-primary" @click="startDiscovery()" :disabled="disc.running || busy"
-                  x-text="disc.running ? 'Running…' : 'Start discovery'"></button>
-        </div>
-      </div>
+  <!-- ============ DISCOVERY RADAR ============ -->
+  <section x-show="tab==='discovery'">
+    <div class="card p-5 mb-4 flex flex-wrap gap-2.5 items-center">
+      <h3 class="font-semibold text-white grow">Discovery Radar — Target Auto-Discovery & Validation</h3>
+      <span class="badge" :class="pipeBusy() ? 'badge-warn animate-pulse' : 'badge-idle'" x-text="pipeBusy() ? 'RUNNING' : 'IDLE'"></span>
+      <button class="btn" @click="discOpen ? discOpen=false : openDiscover()" :disabled="busy"
+              x-text="discOpen ? 'Hide keyword tool' : '🔭 Keyword tool'"></button>
     </div>
-
-    <!-- auto-discovery pipeline modal -->
-    <div class="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm grid place-items-center p-4" x-show="pipeOpen" x-cloak @click.self="pipeOpen=false">
-      <div class="card w-full max-w-2xl p-6 max-h-[85vh] overflow-y-auto" x-show="pipeOpen">
-        <div class="flex items-center justify-between mb-1">
-          <h3 class="text-lg font-bold text-white">Auto-Discovery Pipeline</h3>
-          <span class="badge" :class="pipeBusy() ? 'badge-warn' : 'badge-idle'" x-text="pipeBusy() ? 'RUNNING' : 'IDLE'"></span>
-        </div>
-        <p class="text-xs text-slate-400 mb-3">Network-graph miner: walks Telegram's peer recommendations and forward links outward from your seed targets, then validates each candidate via its linked discussion group before promoting it (tag <span class="font-mono">auto_discovery</span>). Read-only toward Telegram — never joins anything.</p>
-        <div class="grid grid-cols-3 md:grid-cols-6 gap-2 mb-4 text-center">
+    <div class="card p-6 mb-4">
+      <p class="text-xs text-slate-400 mb-3">Network-graph miner: walks Telegram's peer recommendations and forward links outward from your seed targets, then validates each candidate via its linked discussion group before promoting it (tag <span class="font-mono">auto_discovery</span>). Read-only toward Telegram — never joins anything.</p>
+      <div class="grid grid-cols-3 md:grid-cols-6 gap-2 mb-4 text-center">
           <div class="bg-black/30 rounded-xl p-3"><div class="text-2xl font-bold text-white" x-text="pipe?.total_discovered ?? pipe?.pool?.total ?? 0"></div><div class="text-xs text-slate-400">total pool</div></div>
           <div class="bg-black/30 rounded-xl p-3"><div class="text-2xl font-bold text-amber-300" x-text="pipe?.pending_count ?? pipe?.pool?.pending ?? 0"></div><div class="text-xs text-slate-400">pending queue</div></div>
           <div class="bg-black/30 rounded-xl p-3"><div class="text-2xl font-bold text-emerald-300" x-text="pipe?.validated_count ?? pipe?.pool?.validated ?? 0"></div><div class="text-xs text-slate-400">validated</div></div>
@@ -279,7 +218,7 @@
         <div class="border-t border-white/10 my-4"></div>
         <div class="flex items-center justify-between mb-2">
           <h4 class="font-bold text-white text-sm">Discovered Targets Pool</h4>
-          <button class="btn !py-1 !px-2" @click="loadStudio()" :disabled="studioLoading">↻ Refresh pool</button>
+          <button class="btn !py-1 !px-2" @click="loadStudio()" :disabled="studioLoading"><span :class="studioLoading && 'animate-spin inline-block'">↻</span> Refresh pool</button>
         </div>
         <div class="flex flex-wrap gap-2 mb-2">
           <input class="input grow min-w-[160px]" placeholder="Search @handle or link…" x-model="studioSearch" @keydown.enter="loadStudio()">
@@ -333,13 +272,77 @@
             <label class="text-slate-400 ml-2">batch</label>
             <input class="input !w-16" type="number" min="1" max="100" x-model.number="validateBatch">
           </div>
-          <button class="btn" @click="pipeOpen=false">Close</button>
-          <button class="btn" @click="triggerCrawler()" :disabled="pipeBusy() || busy" x-text="pipe?.crawler?.running ? 'Crawling…' : '🕸 Crawl seeds'"></button>
-          <button class="btn btn-primary" @click="triggerValidator()" :disabled="pipeBusy() || busy" x-text="pipe?.running ? 'Validating…' : '✅ Validate pool'"></button>
+          <button class="btn" @click="discOpen ? discOpen=false : openDiscover()" x-text="discOpen ? 'Hide keyword tool' : '🔭 Keyword tool'"></button>
+          <button class="btn" @click="triggerCrawler()" :disabled="pipeBusy() || busy" :class="pipe?.crawler?.running && 'btn-primary animate-pulse'" x-text="pipe?.crawler?.running ? '⟳ Crawling…' : '🕸 Run Crawler Sweep'"></button>
+          <button class="btn btn-primary" @click="triggerValidator()" :disabled="pipeBusy() || busy" :class="pipe?.running && 'animate-pulse'" x-text="pipe?.running ? '⟳ Validating…' : '✅ Validate Batch'"></button>
         </div>
-      </div>
     </div>
 
+    <!-- keyword discovery tool (secondary, embedded alongside the crawler) -->
+    <div class="card p-6 mb-4" x-show="discOpen" x-cloak>
+        <div class="flex items-center justify-between mb-1">
+          <h3 class="text-lg font-bold text-white">Discover Targets — keyword search</h3>
+          <div class="flex items-center gap-2">
+            <span class="badge" :class="disc.running ? 'badge-warn animate-pulse' : 'badge-idle'" x-text="disc.running ? 'RUNNING' : 'IDLE'"></span>
+            <button class="btn !py-1 !px-2" @click="discOpen=false">Hide</button>
+          </div>
+        </div>
+        <p class="text-xs text-slate-400 mb-3">Persian keyword search + forward-graph scan. Candidates are pre-validated zero-join: only channels with a verified commentable discussion group are added (tag <span class="font-mono">auto_discovered</span>). Never joins anything.</p>
+        <div class="space-y-3">
+          <div>
+            <label class="text-xs text-slate-400">Keyword pools (click to add)</label>
+            <div class="flex flex-wrap gap-1.5 mt-1">
+              <template x-for="kw in discDefaults" :key="kw">
+                <button class="badge !px-2 !py-1 cursor-pointer transition" :class="discKeywords.includes(kw) ? 'badge-ok' : 'badge-idle'"
+                        @click="discKeywords.includes(kw) ? discKeywords = discKeywords.filter(k => k !== kw) : discKeywords.push(kw)"
+                        x-text="kw"></button>
+              </template>
+            </div>
+          </div>
+          <div>
+            <label class="text-xs text-slate-400">Custom keywords (comma or newline separated, optional)</label>
+            <textarea class="input font-mono text-xs mt-1" rows="2" x-model="discCustom" placeholder="ارز دیجیتال, تتر, قیمت طلا"></textarea>
+          </div>
+          <div class="flex gap-3">
+            <div class="grow">
+              <label class="text-xs text-slate-400">Max channels to accept</label>
+              <input class="input mt-1" type="number" min="1" max="25" x-model.number="discLimit">
+            </div>
+            <div class="grow">
+              <label class="text-xs text-slate-400">Jitter between searches</label>
+              <input class="input mt-1 bg-black/10" disabled value="15–45s (fixed)">
+            </div>
+          </div>
+          <div class="bg-black/30 rounded-xl p-3 text-xs" x-show="disc.running || disc.scanned">
+            <div class="flex gap-4 font-semibold">
+              <span class="text-slate-300">scanned <b class="text-white" x-text="disc.scanned"></b></span>
+              <span class="text-emerald-300">accepted <b x-text="disc.accepted"></b></span>
+              <span class="text-amber-300">discarded <b x-text="disc.discarded"></b></span>
+            </div>
+            <div class="text-slate-400 mt-1" x-show="disc.current_keyword" x-text="'searching: ' + disc.current_keyword"></div>
+            <div class="mt-1.5 h-1.5 bg-white/10 rounded-full overflow-hidden">
+              <div class="h-full bg-emerald-400/70 transition-all" :style="'width:' + discProgress() + '%'"></div>
+            </div>
+            <div class="text-slate-500 mt-1.5 space-y-0.5 max-h-24 overflow-y-auto">
+              <template x-for="(d,i) in disc.discards" :key="i">
+                <div class="truncate" x-text="'✗ ' + d"></div>
+              </template>
+              <template x-for="(a,i) in disc.accepted_targets" :key="'a'+i">
+                <div class="text-emerald-400/90 truncate" x-text="'✓ accepted ' + a"></div>
+              </template>
+            </div>
+          </div>
+
+        </div>
+        <div class="mt-5 flex justify-end gap-2">
+          <button class="btn btn-primary" @click="startDiscovery()" :disabled="disc.running || busy"
+                  x-text="disc.running ? 'Running…' : 'Start discovery'"></button>
+        </div>
+    </div>
+  </section>
+
+  <!-- CHANNELS (continued): modals + configured-targets table -->
+  <section x-show="tab==='channels'">
     <!-- bulk import modal -->
     <div class="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm grid place-items-center p-4" x-show="bulkOpen" x-cloak @click.self="bulkOpen=false">
       <div class="card w-full max-w-xl p-6" x-show="bulkOpen">
@@ -742,7 +745,7 @@ function dash() {
     tplModalOpen: false, tplForm: { id: null, name: '', template: '', is_active: false }, tplPreview: [],
     discOpen: false, discKeywords: [], discCustom: '', discLimit: 5,
     disc: {}, discDefaults: [], discTimer: null,
-    pipeOpen: false, pipe: {}, pipeTimer: null, pipeWasRunning: false, pipeJustFinished: false,
+    pipe: {}, pipeTimer: null, pipeWasRunning: false, pipeJustFinished: false,
     studioTargets: [], studioTotal: 0, studioSearch: '', studioStatus: '', studioOffset: 0, studioLoading: false,
     sweepSeeds: 5, validateBatch: 25, purgeDays: null,
     fStatus: '', fTarget: '', fSince: '', toastMsg: '', toastOk: true,
@@ -790,7 +793,7 @@ function dash() {
         if (this.tab === 'tasks') this.loadTasks();
       } catch (e) { this.hp = {}; }
     },
-    switchTab(t) { this.tab = t; if (t === 'tasks') this.loadTasks(); if (t === 'logs') this.loadLogs(); if (t === 'accounts') this.loadAccounts(); if (t === 'channels') this.loadChannels(); if (t === 'templates' || t === 'studio') this.loadTemplates(); if (t === 'settings') this.loadSettings(); },
+    switchTab(t) { this.tab = t; if (t === 'tasks') this.loadTasks(); if (t === 'logs') this.loadLogs(); if (t === 'accounts') this.loadAccounts(); if (t === 'channels') this.loadChannels(); if (t === 'templates' || t === 'studio') this.loadTemplates(); if (t === 'settings') this.loadSettings(); if (t === 'discovery') { this.pollPipeline(); this.loadStudio(); this.startPipelinePolling(); } },
 
     async api(path, opts = {}, quiet) {
       const res = await fetch(path, { headers: opts.body ? {} : {}, ...opts });
@@ -809,7 +812,7 @@ function dash() {
     async loadAccounts() { this.accounts = (await this.api('/api/accounts', {}, 1)).accounts.map(a => ({ ...a, checking: false, check_result: null })); },
     async healthcheck(a) { a.checking = true; try { a.check_result = await this.api(`/api/accounts/${a.id}/healthcheck`, { method: 'POST' }, 1); } catch (e) { a.check_result = { ok: false, error: e.message }; } a.checking = false; },
 
-    async loadChannels() { this.targets = (await this.api('/api/channels', {}, 1)).targets; this.pollPipeline(); },
+    async loadChannels() { this.targets = (await this.api('/api/channels', {}, 1)).targets; this.pollPipeline(); this.loadStudio(); },
     async addChannel() { try { await this.api('/api/channels', { method: 'POST', body: new URLSearchParams({ target: this.newTarget, tag: this.newTag }) }); this.newTarget = ''; this.newTag = ''; this.toast('Target added'); this.loadChannels(); } catch (e) {} },
     async toggleChannel(id) { await this.api(`/api/channels/${id}/toggle`, { method: 'PATCH' }); this.loadChannels(); },
     async deleteChannel(id) { await this.api(`/api/channels/${id}`, { method: 'DELETE' }); this.toast('Target deleted'); this.loadChannels(); },
@@ -865,14 +868,13 @@ function dash() {
         this.pollDiscovery();
       } catch (e) {} this.busy = false;
     },
-    async openPipeline() {
-      this.pipeOpen = true;
+    startPipelinePolling() {
       this.pollPipeline();
       this.studioOffset = 0;
       this.loadStudio();
       clearInterval(this.pipeTimer);
       this.pipeTimer = setInterval(() => {
-        if (this.pipeOpen) this.pollPipeline();
+        if (this.tab === 'discovery') this.pollPipeline();
         else clearInterval(this.pipeTimer);
       }, 3000);
     },
